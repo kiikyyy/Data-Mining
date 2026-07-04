@@ -1,0 +1,210 @@
+---
+title: "TUGAS 3 PDM"
+author: "Kelompok C"
+date: "2026-03-25"
+output:
+  html_document: default
+  pdf_document: default
+---
+```{r}
+library(caret)
+library(dplyr)
+library(lmtest)
+library(car)
+library(pscl)
+library(ResourceSelection)
+library(pROC)
+library(recipes)
+library(themis)
+```
+
+
+```{r}
+#MEMBACA DATA
+data <- read.csv("C:/Users/User/Downloads/iranian+churn+dataset/Customer Churn.csv")
+head(data)
+```
+
+```{r}
+#CEK TIPE DATA
+str(data)
+```
+
+```{r}
+#UBAH TIPE DATA 
+data$Churn        <- as.factor(data$Churn)
+data$Status       <- as.factor(data$Status)
+data$Complains    <- as.factor(data$Complains)
+data$`Tariff.Plan`<- as.factor(data$`Tariff.Plan`)
+```
+
+```{r}
+data <- data %>% select(-Age.Group)
+```
+
+
+```{r}
+#CEK MISSING VALUE
+cat("Jumlah missing values:", sum(is.na(data)), "\n")
+```
+```{r}
+#CEK PROPORSI
+prop.table(table(data$Churn))
+```
+
+```{r}
+#SPLIT DATA
+set.seed(123)
+index <- createDataPartition(data$Churn, p=.80, list=F)
+train_data <- data[index, ]
+test_data  <- data[-index, ]
+
+print(paste("Jumlah data latih:", nrow(train_data)))
+print(paste("Jumlah data uji  :", nrow(test_data)))
+```
+
+```{r}
+#SEIMBANGKAN DATA TRAIN DENGAN SMOTE
+cat("Distribusi kelas sebelum SMOTE:\n")
+print(table(train_data$Churn))
+
+set.seed(123)
+rec <- recipe(Churn ~ ., data = train_data) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_smote(Churn, over_ratio = 1) %>%
+  prep()
+
+rec_prep <- prep(rec)
+
+train_balanced <- bake(rec_prep, new_data = NULL)
+test_input     <- bake(rec_prep, new_data = test_data)
+
+cat("Distribusi setelah SMOTE:\n")
+table(train_balanced$Churn)
+```
+
+```{r}
+#BANGUN MODEL
+model_full <- glm(Churn ~ ., data = train_balanced, family = binomial)
+
+#Stepwise
+model_stepws <- stats::step(model_full, direction = "both", trace = FALSE)
+summary(model_stepws)
+```
+
+```{r}
+#UJI MULTIKOLINEARITAS (VIF)
+#VIF < 10 = tidak ada multikolinearitas serius
+vif(model_stepws)
+```
+
+```{r}
+#BANGUN MODEL FIX
+#Hapus variabel berdasarkan VIF tinggi dan Stepwise p value tidak signifikan
+model <- glm(Churn ~ . -Customer.Value -Seconds.of.Use, data = train_balanced, family = binomial)
+summary(model)
+```
+```{r}
+vif(model)
+```
+```{r}
+#UJI LIKELIHOOD RATIO
+#p-value < 0.05 = signifikan
+lrtest(model)
+```
+
+```{r}
+#UJI PSEUDO R²
+#McFadden R² > 0.2 = model baik
+pR2(model)
+```
+
+```{r}
+#UJI HOSMER-LEMESHOW
+#p-value > 0.05 = model fit
+hoslem.test(
+  as.numeric(train_balanced$Churn) - 1,
+  fitted(model),
+  g = 10)
+```
+
+```{r}
+#PREDIKSI DATA TRAIN
+prob_train <- predict(model, newdata = train_balanced, type = "response")
+pred_train <- factor(ifelse(prob_train > 0.5, "1", "0"), levels = c("0","1"))
+
+#Confusion matrix
+conf_matrix_train <- table(Predicted = pred_train, Actual = train_balanced$Churn)
+conf_matrix_train
+```
+
+```{r}
+#AKURASI
+accuracy_train <- round((sum(diag(conf_matrix_train))/sum(conf_matrix_train))*100, 2)
+cat("Akurasi data train:", accuracy_train, "%\n")
+```
+```{r}
+#EVALUASI LENGKAP
+library(caret)
+conf_eval_train <- confusionMatrix(pred_train, train_balanced$Churn, positive = "1")
+conf_eval_train
+```
+
+```{r}
+#PREDIKSI DATA TEST
+prob_test <- predict(model, newdata = test_input, type = "response")
+pred_test  <- factor(ifelse(prob_test  > 0.5, "1", "0"), levels = c("0","1"))
+
+#Confusion matrix manual
+conf_matrix_test <- table(Predicted = pred_test, Actual = test_input$Churn)
+conf_matrix_test
+```
+
+```{r}
+#AKURASI
+accuracy_test <- round((sum(diag(conf_matrix_test))/sum(conf_matrix_test))*100, 2)
+cat("Akurasi data test:", accuracy_test, "%\n")
+```
+
+```{r}
+#EVALUASI LENGKAP
+library(caret)
+conf_eval_test <- confusionMatrix(pred_test, test_input$Churn, positive = "1")
+conf_eval_test
+```
+
+```{r}
+#ROC CURVE & AUC PREDIKSI TEST
+library(pROC)
+
+#ROC curve
+roc_obj <- roc(test_input$Churn, prob_test,
+               levels    = c("0", "1"),
+               direction = "<")
+
+plot(roc_obj, col = "blue", lwd = 2, main = "ROC Curve - Test Set")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+#Hitung AUC
+auc_value <- auc(roc_obj)
+cat("AUC Test Set:", round(auc_value, 4), "\n")
+```
+
+```{r}
+#Tabel Perbandingan
+hasil_evaluasi <- data.frame(
+  "Regresi Logistik" = c("Data Latih (Training)", "Data Uji (Testing)"),
+  "Accuracy" = c(round(conf_eval_train$overall["Accuracy"], 2),
+                 round(conf_eval_test$overall["Accuracy"], 2)),
+  "Precision" = c(round(conf_eval_train$byClass["Pos Pred Value"], 2),
+                  round(conf_eval_test$byClass["Pos Pred Value"], 2)),
+  "Recall" = c(round(conf_eval_train$byClass["Sensitivity"], 2),
+               round(conf_eval_test$byClass["Sensitivity"], 2)),
+  "F1.Score" = c(round(conf_eval_train$byClass["F1"], 2),
+                 round(conf_eval_test$byClass["F1"], 2)),
+  check.names = FALSE
+)
+
+print(hasil_evaluasi, row.names = FALSE)
+```
+
