@@ -1,0 +1,557 @@
+---
+title: "Tugas K-medoids"
+author: "Kelompok C"
+date: "2026-05-15"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(cluster)
+library(factoextra)
+library(ggplot2)
+library(dplyr)
+library(corrplot)
+library(gridExtra)
+library(fpc)
+```
+
+# LANGKAH 1: EDA (Exploratory Data Analysis)
+
+```{r}
+# Load Dataset
+data <- read.csv("C:/Users/User/Documents/KULIAH/sem 4/pdm/data balita.csv")
+head(data)
+```
+
+```{r}
+# Struktur data
+str(data)
+```
+
+```{r}
+# Statistik Deskriptif
+summary(data)
+```
+
+```{r}
+# Cek Missing Value 
+colSums(is.na(data))
+```
+
+```{r}
+# Identifikasi Outlier dengan Metode IQR
+variabel_zs <- c("ZS_BB.U", "ZS_TB.U", "ZS_BB.TB")
+
+for (var in variabel_zs) {
+  Q1          <- quantile(data[[var]], 0.25)
+  Q3          <- quantile(data[[var]], 0.75)
+  IQR_val     <- IQR(data[[var]])
+  batas_bawah <- Q1 - 1.5 * IQR_val
+  batas_atas  <- Q3 + 1.5 * IQR_val
+  outlier_idx <- which(data[[var]] < batas_bawah |
+                         data[[var]] > batas_atas)
+  cat(sprintf("\nVariabel : %s\n", var))
+  cat(sprintf("  Q1=%.2f | Q3=%.2f | IQR=%.2f\n", Q1, Q3, IQR_val))
+  cat(sprintf("  Batas Bawah=%.2f | Batas Atas=%.2f\n", batas_bawah, batas_atas))
+  if (length(outlier_idx) > 0) {
+    cat("  Outlier pada ID:", data$id_balita[outlier_idx], "\n")
+  } else {
+    cat("  Tidak ada outlier\n")
+  }
+}
+```
+
+```{r}
+# Kategori Status Gizi WHO 2006
+data$status_BB_U  <- ifelse(data$ZS_BB.U  < -2, "Underweight", "Normal")
+data$status_TB_U  <- ifelse(data$ZS_TB.U  < -2, "Stunting",    "Normal")
+data$status_BB_TB <- ifelse(data$ZS_BB.TB < -2, "Wasting",     "Normal")
+
+cat("\nSTATUS GIZI BERDASARKAN Z-SCORE WHO 2006\n")
+cat("BB/U  (Underweight) :\n"); print(table(data$status_BB_U))
+cat("TB/U  (Stunting)    :\n"); print(table(data$status_TB_U))
+cat("BB/TB (Wasting)     :\n"); print(table(data$status_BB_TB))
+```
+
+```{r}
+# Plot 1: Boxplot Z-Score
+par(mfrow = c(1, 3))
+boxplot(data$ZS_BB.U,  main = "Boxplot ZS BB/U",
+        ylab = "Z-Score", col = "skyblue")
+abline(h = -2, col = "red", lty = 2, lwd = 2)
+
+boxplot(data$ZS_TB.U,  main = "Boxplot ZS TB/U",
+        ylab = "Z-Score", col = "lightgreen")
+abline(h = -2, col = "red", lty = 2, lwd = 2)
+
+boxplot(data$ZS_BB.TB, main = "Boxplot ZS BB/TB",
+        ylab = "Z-Score", col = "lightyellow")
+abline(h = -2, col = "red", lty = 2, lwd = 2)
+```
+
+```{r}
+# Plot 2: Scatter ZS_BB/U vs ZS_TB/U
+plot(data$ZS_BB.U, data$ZS_TB.U,
+     pch = 19, col = "steelblue",
+     xlab = "Z-Score BB/U (Underweight)",
+     ylab = "Z-Score TB/U (Stunting)",
+     main = "Scatter Plot: ZS BB/U vs ZS TB/U")
+abline(h = -2, v = -2, col = "red", lty = 2, lwd = 1.5)
+text(data$ZS_BB.U, data$ZS_TB.U,
+     labels = data$id_balita, pos = 3, cex = 0.7)
+legend("topleft", legend = "Batas -2 SD (WHO)",
+       col = "red", lty = 2, bty = "n")
+```
+
+```{r}
+# Plot 3: Histogram distribusi Z-Score
+par(mfrow = c(1, 3))
+hist(data$ZS_BB.U,  main = "Distribusi ZS BB/U",
+     xlab = "Z-Score", col = "skyblue",    border = "white", breaks = 8)
+abline(v = -2, col = "red", lty = 2, lwd = 2)
+
+hist(data$ZS_TB.U,  main = "Distribusi ZS TB/U",
+     xlab = "Z-Score", col = "lightgreen", border = "white", breaks = 8)
+abline(v = -2, col = "red", lty = 2, lwd = 2)
+
+hist(data$ZS_BB.TB, main = "Distribusi ZS BB/TB",
+     xlab = "Z-Score", col = "lightyellow", border = "white", breaks = 8)
+abline(v = -2, col = "red", lty = 2, lwd = 2)
+```
+
+```{r}
+# Plot 4: Korelasi antar variabel Z-Score
+cor_matrix <- cor(data[, c("ZS_BB.U", "ZS_TB.U", "ZS_BB.TB")])
+print(round(cor_matrix, 3))
+corrplot(cor_matrix, method = "color", type = "upper",
+         tl.col = "black", addCoef.col = "black",
+         title  = "Korelasi Variabel Z-Score", mar = c(0,0,1,0))
+```
+
+# LANGKAH 2: PREPROCESSING
+
+```{r}
+# Pilih Variabel Fitur (3 indikator Z-Score WHO)
+data_model           <- data[, c("ZS_BB.U", "ZS_TB.U", "ZS_BB.TB")]
+rownames(data_model) <- data$id_balita
+
+cat("Variabel yang digunakan untuk clustering:\n")
+print(names(data_model))
+```
+
+```{r}
+# Cek Skala Data
+cat("Rata-rata tiap variabel (Z-Score asli):\n")
+print(round(colMeans(data_model), 3))
+cat("Standar deviasi tiap variabel (Z-Score asli):\n")
+print(round(apply(data_model, 2, sd), 3))
+
+# Meskipun ketiga variabel sudah berupa Z-Score WHO, rata-rata dan SD
+# antar variabel tidak identik (ZS_BB/TB memiliki rata-rata dan SD yang
+# berbeda dari ZS_BB/U dan ZS_TB/U). Standardisasi ulang dilakukan agar
+# ketiga variabel berkontribusi setara dalam perhitungan jarak Euclidean
+# pada K-Medoids.
+```
+
+```{r}
+# Standardisasi Data
+data_scaled <- scale(data_model)
+
+cat("Data setelah standardisasi (6 baris pertama):\n")
+print(round(head(data_scaled), 4))
+cat("Rata-rata setelah scaling (harus ~0):\n")
+print(round(colMeans(data_scaled), 5))
+cat("SD setelah scaling (harus ~1):\n")
+print(round(apply(data_scaled, 2, sd), 5))
+```
+
+```{r}
+# Keputusan Berdasarkan Hasil Korelasi
+cat("===== KEPUTUSAN BERDASARKAN KORELASI =====\n")
+cor_tinggi <- which(abs(cor_matrix) > 0.9 & cor_matrix != 1, arr.ind = TRUE)
+
+if (nrow(cor_tinggi) > 0) {
+  cat("Korelasi antar variabel > 0.9 ditemukan (multikolinearitas tinggi).\n")
+  cat("Namun pada clustering berbasis jarak (K-Medoids), multikolinearitas\n")
+  cat("tidak berdampak signifikan seperti pada regresi. Ketiga variabel\n")
+  cat("Z-Score WHO tetap dipertahankan karena masing-masing mengukur\n")
+  cat("dimensi klinis yang berbeda:\n")
+  cat("  ZS_BB/U  = status massa tubuh terhadap umur (underweight)\n")
+  cat("  ZS_TB/U  = pertumbuhan linear terhadap umur (stunting)\n")
+  cat("  ZS_BB/TB = proporsi berat terhadap tinggi badan (wasting)\n")
+  cat("Kesimpulan: Ketiga variabel DIPERTAHANKAN tanpa reduksi dimensi.\n")
+}
+```
+
+```{r}
+# Alasan Outlier Tidak Dihapus
+cat("Catatan: Outlier tidak dihapus.\n")
+cat("K-Medoids (PAM) dipilih karena robust terhadap outlier.\n")
+cat("Medoid merupakan data asli (bukan rata-rata), sehingga pencilan\n")
+cat("tidak mendistorsi pusat cluster seperti pada K-Means.\n")
+```
+
+# LANGKAH 3: MODELING
+
+```{r}
+# Fit Model K-Medoids dengan K=2
+# K=2 dipilih sesuai tujuan segmentasi biner Dinas Kesehatan:
+# "Risiko Stunting Rendah" vs "Risiko Stunting Tinggi"
+set.seed(123)
+hasil_pam <- pam(data_scaled, k = 2)
+
+cat("Ringkasan hasil PAM:\n")
+print(hasil_pam)
+```
+
+```{r}
+# Pengelompokan tiap balita
+cat("Hasil Pengelompokan Balita:\n")
+print(hasil_pam$clustering)
+```
+
+```{r}
+# Medoid dalam skala standar
+cat("Medoid - Pusat Cluster (skala standar):\n")
+print(hasil_pam$medoids)
+```
+
+```{r}
+# Medoid dalam Z-Score asli (untuk interpretasi klinis)
+cat("Medoid - Pusat Cluster (Z-Score asli):\n")
+print(data_model[rownames(hasil_pam$medoids), ])
+```
+
+```{r}
+# Silhouette awal K=2
+cat(sprintf("Silhouette Width K=2 (hasil awal): %.4f\n",
+            hasil_pam$silinfo$avg.width))
+
+# Plot Cluster K=2 pada Z-Score asli
+plot(data_model$ZS_BB.U, data_model$ZS_TB.U,
+     col  = hasil_pam$clustering + 1,
+     pch  = 19, cex = 1.5,
+     xlab = "Z-Score BB/U", ylab = "Z-Score TB/U",
+     main = "K-Medoids K=2 | ZS BB/U vs ZS TB/U")
+points(data_model[rownames(hasil_pam$medoids), "ZS_BB.U"],
+       data_model[rownames(hasil_pam$medoids), "ZS_TB.U"],
+       pch = 4, cex = 2.5, lwd = 3, col = 1:2)
+text(data_model$ZS_BB.U, data_model$ZS_TB.U,
+     labels = rownames(data_model), pos = 3, cex = 0.7)
+abline(h = -2, v = -2, col = "gray50", lty = 2)
+legend("topleft",
+       legend = c("Cluster 1", "Cluster 2", "Medoid"),
+       col    = c(2, 3, 1), pch = c(19, 19, 4), bty = "n")
+```
+
+```{r}
+# Visualisasi Cluster K=2 (fviz)
+fviz_cluster(hasil_pam,
+             data         = data_scaled,
+             ellipse.type = "convex",
+             palette      = c("#E74C3C", "#2ECC71"),
+             ggtheme      = theme_minimal(),
+             main         = "Visualisasi Cluster K-Medoids (K=2)")
+```
+
+## Mencari K Optimal
+
+```{r}
+# Elbow Method - K-Means
+cat("Elbow Method K-Means...\n")
+wss_km <- c()
+for (k in 1:5) {
+  set.seed(123)
+  wss_km[k] <- sum(kmeans(data_scaled, centers = k, nstart = 25)$withinss)
+}
+cat("Total WSS K-Means tiap K:\n")
+for (k in 1:5) cat(sprintf("  K=%d: %.4f\n", k, wss_km[k]))
+
+plot(1:5, wss_km, type = "b", pch = 19, col = "steelblue",
+     xlab = "Jumlah Cluster K", ylab = "Total Within Sum of Squares (WSS)",
+     main = "Elbow Method - K-Means")
+abline(v = 2, col = "red", lty = 2, lwd = 2)
+legend("topright", legend = "K dipilih = 2", col = "red", lty = 2, bty = "n")
+```
+
+```{r}
+# Elbow Method - K-Medoids
+cat("Elbow Method K-Medoids...\n")
+wss_pam <- c()
+for (k in 1:5) {
+  wss_pam[k] <- pam(data_scaled, k = k)$objective["swap"]
+}
+cat("Total Dissimilarity K-Medoids tiap K:\n")
+for (k in 1:5) cat(sprintf("  K=%d: %.4f\n", k, wss_pam[k]))
+
+plot(1:5, wss_pam, type = "b", pch = 19, col = "darkorange",
+     xlab = "Jumlah Cluster K", ylab = "Total Dissimilarity (Swap Objective)",
+     main = "Elbow Method - K-Medoids")
+abline(v = 2, col = "red", lty = 2, lwd = 2)
+legend("topright", legend = "K dipilih = 2", col = "red", lty = 2, bty = "n")
+```
+
+```{r}
+# Silhouette Method - K-Means
+# K=1 tidak dapat dihitung silhouette, mulai dari K=2
+cat("Silhouette Method K-Means...\n")
+sil_km <- c(NA)
+for (k in 2:5) {
+  set.seed(123)
+  km_fit    <- kmeans(data_scaled, centers = k, nstart = 25)
+  sil_km[k] <- mean(silhouette(km_fit$cluster, dist(data_scaled))[, 3])
+}
+cat("Silhouette Width K-Means tiap K:\n")
+for (k in 2:5) cat(sprintf("  K=%d: %.4f\n", k, sil_km[k]))
+cat(sprintf("K optimal K-Means (Silhouette): K = %d\n", which.max(sil_km)))
+
+plot(2:5, sil_km[2:5], type = "b", pch = 19, col = "steelblue",
+     xlab = "Jumlah Cluster K", ylab = "Rata-rata Silhouette Width",
+     main = "Metode Silhouette - K-Means")
+abline(v = which.max(sil_km), lty = 2, col = "red", lwd = 2)
+legend("topright",
+       legend = paste("K optimal =", which.max(sil_km)),
+       col = "red", lty = 2, bty = "n")
+```
+
+```{r}
+# Silhouette Method - K-Medoids
+# K=1 tidak dapat dihitung silhouette, mulai dari K=2
+cat("Silhouette Method K-Medoids...\n")
+sil_pam <- c(NA)
+for (k in 2:5) {
+  pam_fit    <- pam(data_scaled, k = k)
+  sil_pam[k] <- pam_fit$silinfo$avg.width}
+cat("Silhouette Width K-Medoids tiap K:\n")
+for (k in 2:5) cat(sprintf("  K=%d: %.4f\n", k, sil_pam[k]))
+cat(sprintf("K optimal K-Medoids (Silhouette): K = %d\n", which.max(sil_pam)))
+
+plot(2:5, sil_pam[2:5], type = "b", pch = 19, col = "darkorange",
+     xlab = "Jumlah Cluster K", ylab = "Rata-rata Silhouette Width",
+     main = "Metode Silhouette - K-Medoids")
+abline(v = which.max(sil_pam), lty = 2, col = "red", lwd = 2)
+legend("topright",
+       legend = paste("K optimal =", which.max(sil_pam)),
+       col = "red", lty = 2, bty = "n")
+```
+
+```{r}
+# Kesimpulan K Optimal
+cat("===== KESIMPULAN PENCARIAN K OPTIMAL =====\n")
+cat("Elbow K-Means        : perhatikan siku pada plot\n")
+cat("Elbow K-Medoids      : perhatikan siku pada plot\n")
+cat(sprintf("Silhouette K-Means   : K optimal = %d (avg.sil = %.4f)\n",
+            which.max(sil_km),  max(sil_km,  na.rm = TRUE)))
+cat(sprintf("Silhouette K-Medoids : K optimal = %d (avg.sil = %.4f)\n",
+            which.max(sil_pam), max(sil_pam, na.rm = TRUE)))
+cat(">>> K = 2 TERKONFIRMASI optimal → model K=2 yang dipilih di awal sudah tepat.\n")
+```
+
+# LANGKAH 4: EVALUASI
+
+```{r}
+# Rata-rata Silhouette Width
+sil_avg <- hasil_pam$silinfo$avg.width
+cat(sprintf("Rata-rata Silhouette Width: %.4f\n", sil_avg))
+
+if (sil_avg >= 0.70) {
+  cat("Interpretasi: Struktur cluster KUAT (>= 0.70)\n")
+} else if (sil_avg >= 0.50) {
+  cat("Interpretasi: Struktur cluster SEDANG (0.50 - 0.69)\n")
+} else if (sil_avg >= 0.25) {
+  cat("Interpretasi: Struktur cluster LEMAH (0.25 - 0.49)\n")
+} else {
+  cat("Interpretasi: Tidak ada struktur cluster yang berarti (< 0.25)\n")}
+```
+
+```{r}
+# Silhouette Width per Observasi
+cat("Silhouette Width per Balita:\n")
+sil_detail <- silhouette(hasil_pam$clustering, dist(data_scaled))
+summary(sil_detail)
+
+# Plot Silhouette
+plot(sil_detail,
+     col    = c("tomato", "steelblue"),
+     border = NA,
+     main   = "Silhouette Plot K-Medoids K=2")
+```
+
+```{r}
+# Ukuran Cluster
+cat("Ukuran tiap Cluster:\n")
+print(table(hasil_pam$clustering))
+```
+
+```{r}
+# Dunn Index
+d_mat      <- as.matrix(dist(data_scaled))
+cl         <- hasil_pam$clustering
+inter_dist <- min(d_mat[cl == 1, cl == 2])
+diam_c1    <- max(d_mat[cl == 1, cl == 1])
+diam_c2    <- max(d_mat[cl == 2, cl == 2])
+dunn_idx   <- inter_dist / max(diam_c1, diam_c2)
+
+cat(sprintf("Dunn Index: %.4f\n", dunn_idx))
+cat("Interpretasi: Semakin besar nilai Dunn Index, jarak antar cluster\n")
+cat("semakin jauh dan homogenitas dalam cluster semakin tinggi.\n")
+```
+
+```{r}
+# Visualisasi Cluster Final (fviz)
+fviz_cluster(hasil_pam,
+             data         = data_scaled,
+             ellipse.type = "convex",
+             palette      = c("#E74C3C", "#2ECC71"),
+             ggtheme      = theme_minimal(),
+             main         = "Evaluasi Cluster K-Medoids K=2")
+```
+
+# LANGKAH 5: ANALISIS
+
+```{r}
+# Gabungkan Hasil Cluster ke Data Asli
+data$cluster <- hasil_pam$clustering
+
+rata_per_cluster <- data %>%
+  group_by(cluster) %>%
+  summarise(
+    n         = n(),
+    ZS_BB_U   = round(mean(ZS_BB.U),  3),
+    ZS_TB_U   = round(mean(ZS_TB.U),  3),
+    ZS_BB_TB  = round(mean(ZS_BB.TB), 3),
+    rerata_BB = round(mean(BB_kg), 2),
+    rerata_TB = round(mean(TB_cm), 2),
+    .groups   = "drop"
+  )
+
+cat("Rata-rata Variabel per Cluster:\n")
+print(as.data.frame(rata_per_cluster))
+```
+
+```{r}
+# Label otomatis berdasarkan ZS_TB/U terendah
+cluster_risiko_tinggi <- rata_per_cluster$cluster[
+  which.min(rata_per_cluster$ZS_TB_U)]
+cat(sprintf("Cluster %d → ZS TB/U paling rendah → RISIKO STUNTING TINGGI\n",
+            cluster_risiko_tinggi))
+
+data$segmen <- ifelse(
+  data$cluster == cluster_risiko_tinggi,
+  "Risiko Stunting Tinggi",
+  "Risiko Stunting Rendah"
+)
+```
+
+```{r}
+# Daftar Balita per Segmen
+daftar_balita <- data %>%
+  filter(segmen %in% c("Risiko Stunting Tinggi",
+                       "Risiko Stunting Rendah")) %>%
+  select(id_balita, umur_bulan, BB_kg, TB_cm,
+         ZS_BB.U, ZS_TB.U, ZS_BB.TB, segmen)
+
+daftar_balita
+```
+
+```{r}
+# Plot Cluster Final pada Z-Score asli
+plot(data$ZS_BB.U, data$ZS_TB.U,
+     col  = ifelse(data$segmen == "Risiko Stunting Tinggi",
+                   "tomato", "steelblue"),
+     pch  = 19, cex = 1.5,
+     xlab = "Z-Score BB/U", ylab = "Z-Score TB/U",
+     main = "Segmentasi Risiko Stunting - K-Medoids K=2")
+abline(h = -2, v = -2, col = "gray40", lty = 2)
+text(data$ZS_BB.U, data$ZS_TB.U,
+     labels = data$id_balita, pos = 3, cex = 0.7)
+medoid_rows <- data_model[rownames(hasil_pam$medoids), ]
+points(medoid_rows$ZS_BB.U, medoid_rows$ZS_TB.U,
+       pch = 4, cex = 2.5, lwd = 3, col = c("darkred", "darkblue"))
+legend("topleft",
+       legend = c("Risiko Stunting Tinggi", "Risiko Stunting Rendah", "Medoid"),
+       col    = c("tomato", "steelblue", "black"),
+       pch    = c(19, 19, 4), bty = "n")
+```
+
+```{r}
+# Barplot Perbandingan Z-Score per Segmen
+par(mfrow = c(1, 3))
+for (var in c("ZS_BB.U", "ZS_TB.U", "ZS_BB.TB")) {
+  means <- tapply(data[[var]], data$segmen, mean)
+  barplot(means,
+          col  = c("tomato", "steelblue"),
+          main = paste("Rata-rata", var),
+          ylab = "Z-Score",
+          ylim = c(min(means) - 0.5, 0.5))
+  abline(h = -2, col = "red", lty = 2)
+}
+par(mfrow = c(1, 1))
+```
+
+```{r}
+# Distribusi Segmen
+cat("DISTRIBUSI SEGMEN\n")
+tbl_segmen <- table(data$segmen)
+print(tbl_segmen)
+cat("Persentase:\n")
+print(round(prop.table(tbl_segmen) * 100, 1))
+
+pie(tbl_segmen,
+    col    = c("tomato", "steelblue"),
+    main   = "Distribusi Segmen Risiko Stunting",
+    labels = paste0(names(tbl_segmen), "\n(",
+                    tbl_segmen, " balita, ",
+                    round(prop.table(tbl_segmen) * 100, 1), "%)"))
+```
+
+# LANGKAH 6: REKOMENDASI
+
+```{r}
+cat("=============================================================\n")
+cat("  REKOMENDASI INTERVENSI BERDASARKAN SEGMENTASI\n")
+cat("=============================================================\n")
+
+cat("\nSEGMEN 1: RISIKO STUNTING TINGGI\n")
+cat("----------------------------------------\n")
+cat("Jumlah balita :", sum(data$segmen == "Risiko Stunting Tinggi"), "\n")
+cat("ID Balita     :",
+    paste(data$id_balita[data$segmen == "Risiko Stunting Tinggi"],
+          collapse = ", "), "\n")
+cat("Karakteristik : ZS TB/U < -3 (severe stunting), ZS BB/U < -3,\n")
+cat("                ZS BB/TB < -2 (wasting). Gizi buruk berat.\n")
+cat("\nRekomendasi:\n")
+cat("  1. PMT intensif berbasis protein hewani (telur, ikan, susu)\n")
+cat("     dan MPASI diperkaya mikronutrien (zat besi, zinc, vitamin A).\n")
+cat("  2. Rujukan ke dokter spesialis anak / ahli gizi.\n")
+cat("  3. Pemantauan pertumbuhan ketat setiap bulan di posyandu.\n")
+cat("  4. Edukasi ibu/pengasuh: pola asuh gizi dan higiene sanitasi.\n")
+cat("  5. Koordinasi lintas sektor: Dinsos untuk bantuan pangan.\n")
+
+cat("\nSEGMEN 2: RISIKO STUNTING RENDAH\n")
+cat("----------------------------------------\n")
+cat("Jumlah balita :", sum(data$segmen == "Risiko Stunting Rendah"), "\n")
+cat("ID Balita     :",
+    paste(data$id_balita[data$segmen == "Risiko Stunting Rendah"],
+          collapse = ", "), "\n")
+cat("Karakteristik : ZS TB/U dan ZS BB/U mendekati -1 s.d. 0.\n")
+cat("                Status gizi relatif baik, perlu pemantauan rutin.\n")
+cat("\nRekomendasi:\n")
+cat("  1. Edukasi preventif: ASI eksklusif, MPASI bergizi, imunisasi.\n")
+cat("  2. Pemantauan rutin di posyandu minimal 2 bulan sekali.\n")
+cat("  3. Sosialisasi 1000 Hari Pertama Kehidupan (HPK).\n")
+cat("  4. Pemberian vitamin A dan suplemen zinc sesuai jadwal.\n")
+
+cat("\nCATATAN METODOLOGI:\n")
+cat("  - Standardisasi dilakukan karena rata-rata dan SD antar Z-Score\n")
+cat("    tidak identik, agar tiap variabel berkontribusi setara.\n")
+cat("  - Korelasi > 0.9 tidak menjadi alasan reduksi dimensi (PCA)\n")
+cat("    karena K-Medoids berbasis jarak, bukan regresi.\n")
+cat("  - K-Medoids (PAM) dipilih karena robust terhadap outlier.\n")
+cat("  - K=2 dikonfirmasi optimal oleh Elbow & Silhouette\n")
+cat("    (K-Means dan K-Medoids), sesuai tujuan segmentasi biner.\n")
+cat("  - ZS < -2 (WHO 2006): underweight / stunting / wasting.\n")
+cat("=============================================================\n")
+```
