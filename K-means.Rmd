@@ -1,0 +1,570 @@
+---
+title: "TUGAS PDM 1"
+author: "Annisa Rizky Rarasati"
+date: "2026-05-10"
+output: html_document
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(factoextra)
+library(cluster)
+library(pheatmap)
+library(sf) 
+library(rnaturalearth) 
+library(rnaturalearthdata)
+library(viridis)
+library(ggrepel)
+library(countrycode)
+```
+
+
+```{r}
+data <- read.csv("C:/Users/User/Documents/KULIAH/sem 4/pdm/data.csv",header=TRUE)
+head(data)
+```
+```{r}
+str(data)
+```
+```{r}
+summary(data)
+```
+```{r}
+# Preprocessing
+# Menghapus spasi tersembunyi di awal/akhir nama negara
+data$Country <- trimws(data$Country)
+
+# Menyimpan daftar nama negara ke variabel terpisah
+country <- data$Country
+
+# Mendefinisikan kolom-kolom yang dijadikan variabel clustering (12 indikator)
+features <- c(
+  "SafetySecurity",              # Keamanan & Keselamatan
+  "PersonelFreedom",             # Kebebasan Personal
+  "Governance",                  # Tata Kelola Pemerintahan
+  "SocialCapital",               # Modal Sosial
+  "InvestmentEnvironment",       # Lingkungan Investasi
+  "EnterpriseConditions",        # Kondisi Usaha
+  "MarketAccessInfrastructure",  # Akses Pasar & Infrastruktur
+  "EconomicQuality",             # Kualitas Ekonomi
+  "LivingConditions",            # Kondisi Kehidupan
+  "Health",                      # Kesehatan
+  "Education",                   # Pendidikan
+  "NaturalEnvironment"           # Lingkungan Alam
+)
+
+# Mengecek apakah semua variabel ada
+setdiff(features, colnames(data))
+```
+
+```{r}
+# Scalling Data
+
+# Mengambil hanya kolom fitur dari dataframe
+X <- data[features]
+
+# Standarisasi menggunakan Z-score: (nilai - mean) / sd
+X_scaled <- scale(X)
+
+# Menetapkan nama negara sebagai row name pada data yang sudah di-scale
+rownames(X_scaled) <- country
+head(X_scaled)
+```
+
+```{r}
+# Mencari K optimal
+# Mendefinisikan rentang K yang akan diuji
+K_range <- 2:10
+
+# Menyiapkan vektor kosong untuk menyimpan hasil setiap K
+inertias    <- numeric(length(K_range))  # menyimpan nilai inertia (Total WSS)
+silhouettes <- numeric(length(K_range)) # menyimpan nilai silhouette score
+
+# set.seed() memastikan hasil K-Means selalu sama setiap dijalankan
+# karena K-Means menggunakan inisialisasi acak
+set.seed(123)
+
+# Looping untuk menjalankan K-Means di setiap nilai K
+for (i in seq_along(K_range)) {
+  k  <- K_range[i]
+
+  # Menjalankan K-Means dengan k cluster
+  # nstart = 25 → diulang 25 kali dengan titik awal berbeda, diambil hasil terbaik
+  # iter.max = 100 → maksimal 100 iterasi konvergensi
+  km <- kmeans(X_scaled, centers = k, nstart = 25, iter.max = 100)
+
+  # Menyimpan total within-cluster sum of squares (inertia)
+  # Semakin kecil inertia → data dalam cluster semakin homogen
+  inertias[i] <- km$tot.withinss
+
+  # Menghitung rata-rata silhouette score untuk semua data point
+  # silhouette() menghasilkan nilai per baris, kolom ke-3 adalah skor-nya
+    sil <- silhouette(km$cluster, dist(X_scaled))
+  silhouettes[i] <- mean(sil[, 3])
+}
+
+# Tabel hasil
+hasil_k <- data.frame(
+  K = K_range,
+  Inertia = round(inertias, 2),
+  Silhouette = round(silhouettes, 4)
+)
+
+print(hasil_k)
+```
+
+```{r}
+# Menentukan K terbaik berdasarkan silhouette tertinggi
+best_k_sil <- K_range[which.max(silhouettes)]
+
+# Menentukan K terbaik berdasarkan elbow (penurunan inertia terbesar)
+diffs        <- diff(inertias)       # selisih inertia antar K berurutan
+best_k_elbow <- K_range[which.min(diffs) + 1]  # K setelah penurunan terbesar
+
+# Menampilkan rekomendasi
+cat(sprintf("\n>> K terbaik (Silhouette tertinggi)      : K = %d (score = %.4f)\n",
+            best_k_sil, max(silhouettes)))
+cat(sprintf(">> K terbaik (Elbow - penurunan terbesar): K = %d\n", best_k_elbow))
+cat(">> K YANG DIGUNAKAN: K = 3\n")
+cat("   Alasan: Elbow menunjukkan penurunan inertia terbesar di K=3.\n")
+cat("   K=2 silhouette-nya lebih tinggi tapi terlalu sedikit cluster\n")
+cat("   untuk analisis 168 negara yang bermakna.\n")
+```
+
+```{r}
+# Membuat plot Elbow dan Silhouette secara berdampingan
+par(mfrow = c(1, 2), mar = c(4, 4, 3, 1))
+
+# -- Plot Elbow --
+plot(
+  K_range,
+  inertias,
+  type = "b",
+  pch = 19,
+  col = "steelblue",
+  lwd = 2,
+  xlab = "Jumlah Cluster (K)",
+  ylab = "Total Within SS",
+  main = "Elbow Method (K=3)"
+)
+
+abline(v = 3, col = "red", lty = 2)
+grid()
+
+# -- Plot Silhouette --
+plot(
+  K_range,
+  silhouettes,
+  type = "b",
+  pch = 19,
+  col = "darkgreen",
+  lwd = 2,
+  xlab = "Jumlah Cluster (K)",
+  ylab = "Silhouette Score",
+  main = "Silhouette Method (K=2)"
+)
+
+abline(v = best_k_sil, col = "red", lty = 2)
+grid()
+
+```
+
+```{r}
+# KMEANS FINAL (K = 3)
+k_opt <- 3
+
+set.seed(123)
+
+# Menjalankan K-Means final dengan K = 3
+km_final <- kmeans(
+  X_scaled,
+  centers = k_opt,
+  nstart = 25,
+  iter.max = 100
+)
+
+# Menambahkan label cluster ke dataframe asli
+# as.factor() → mengubah angka cluster menjadi kategori (factor)
+data$Cluster <- as.factor(km_final$cluster)
+
+head(data)
+```
+
+```{r}
+# EVALUASI
+cat("\n", strrep("=", 60), "\n")
+cat("EVALUASI MODEL K-MEANS (K = 3)\n")
+cat(strrep("=", 60), "\n")
+
+# -- Evaluasi 1: Silhouette Score --
+# Mengukur seberapa mirip sebuah data dengan clusternya sendiri
+# dibanding cluster lain. Rentang: -1 (buruk) sampai 1 (sempurna)
+sil_obj <- silhouette(
+  km_final$cluster,
+  dist(X_scaled)
+)
+
+# dist() menghitung jarak Euclidean antar semua pasangan negara
+sil_score <- mean(sil_obj[, 3])  # rata-rata skor semua data point
+
+cat(sprintf("\n1. Silhouette Score       : %.4f\n", sil_score))
+cat("   Interpretasi           : ")
+if (sil_score >= 0.50) {
+  cat("Struktur cluster KUAT (sangat baik)\n")
+} else if (sil_score >= 0.25) {
+  cat("Struktur cluster SEDANG (cukup baik)\n")
+} else {
+  cat("Struktur cluster LEMAH\n")
+}
+
+# -- Evaluasi 2: Explained Variance --
+# Mengukur seberapa besar variasi data yang berhasil dijelaskan oleh cluster
+# Between-SS → variasi ANTAR cluster (semakin besar semakin baik)
+# Total-SS   → total variasi seluruh data
+cat(sprintf("\n2. Within-Cluster SS      : %.2f\n", km_final$tot.withinss))
+cat(sprintf("   Between-Cluster SS     : %.2f\n", km_final$betweenss))
+cat(sprintf("   Total SS               : %.2f\n", km_final$totss))
+cat(sprintf("   Explained Variance     : %.2f%%\n",
+            km_final$betweenss / km_final$totss * 100))
+cat("   Interpretasi           : Semakin tinggi % → pemisahan cluster makin baik\n")
+
+# -- Evaluasi 3: Ukuran Tiap Cluster --
+# Memeriksa apakah ukuran cluster seimbang atau ada yang terlalu kecil/besar
+cat("\n3. Ukuran Tiap Cluster:\n")
+for (c in 1:k_opt) {
+  n <- sum(km_final$cluster == c)
+  cat(sprintf("   Cluster %d : %d negara (%.1f%%)\n", c, n, n / nrow(data) * 100))
+}
+
+# -- Evaluasi 4: Silhouette Score per Cluster --
+# Melihat cluster mana yang paling kohesif (nilai tertinggi = paling kompak)
+cat("\n4. Silhouette Score per Cluster:\n")
+for (c in 1:k_opt) {
+  sil_c <- mean(sil_obj[sil_obj[, 1] == c, 3])
+  cat(sprintf("   Cluster %d : %.4f\n", c, sil_c))
+}
+
+# -- Evaluasi 5: Davies-Bouldin Index --
+# Mengukur rata-rata kemiripan tiap cluster dengan cluster yang paling mirip
+# Rumus: rata-rata (Si + Sj) / dij, di mana Si = dispersi cluster, dij = jarak antar centroid
+# Semakin KECIL nilai DB → cluster semakin baik terpisah (ideal < 1)
+centers_mat <- km_final$centers  # koordinat centroid setiap cluster
+db_vals     <- numeric(k_opt)
+
+for (i in 1:k_opt) {
+  # Hitung dispersi cluster i (rata-rata jarak anggota ke centroid)
+  si <- mean(sqrt(rowSums(
+    (X_scaled[km_final$cluster == i, ] -
+       matrix(centers_mat[i, ], nrow = sum(km_final$cluster == i),
+              ncol = ncol(X_scaled), byrow = TRUE))^2
+  )))
+  max_r <- 0
+  for (j in 1:k_opt) {
+    if (i != j) {
+      sj  <- mean(sqrt(rowSums(
+        (X_scaled[km_final$cluster == j, ] -
+           matrix(centers_mat[j, ], nrow = sum(km_final$cluster == j),
+                  ncol = ncol(X_scaled), byrow = TRUE))^2
+      )))
+      dij   <- sqrt(sum((centers_mat[i, ] - centers_mat[j, ])^2))  # jarak antar centroid
+      max_r <- max(max_r, (si + sj) / dij)
+    }
+  }
+  db_vals[i] <- max_r
+}
+db_index <- mean(db_vals)  # rata-rata semua cluster
+
+cat(sprintf("\n5. Davies-Bouldin Index   : %.4f\n", db_index))
+cat("   Interpretasi           : Semakin kecil semakin baik (< 1.0 = baik)\n")
+
+# -- Ringkasan Evaluasi --
+cat("\n", strrep("-", 60), "\n")
+cat("RINGKASAN EVALUASI:\n")
+cat(sprintf("  Silhouette Score       : %.4f  %s\n", sil_score,
+            ifelse(sil_score >= 0.25, "[CUKUP BAIK]", "[LEMAH]")))
+cat(sprintf("  Explained Variance     : %.2f%% %s\n",
+            km_final$betweenss / km_final$totss * 100,
+            ifelse(km_final$betweenss / km_final$totss * 100 >= 50,
+                   "[BAIK]", "[Perlu ditinjau]")))
+cat(sprintf("  Davies-Bouldin Index   : %.4f  %s\n", db_index,
+            ifelse(db_index < 1.5, "[BAIK]", "[Perlu ditinjau]")))
+cat(strrep("=", 60), "\n")
+```
+
+```{r}
+# VISUALISASI PCA 2D
+# PCA (Principal Component Analysis) mereduksi 12 dimensi → 2 dimensi
+# agar cluster bisa divisualisasikan dalam scatter plot 2D
+pca_result <- prcomp(X_scaled, scale. = FALSE)
+# scale. = FALSE karena data sudah di-scale sebelumnya
+
+# Mengambil 2 komponen utama pertama (PC1 dan PC2)
+pca_data <- as.data.frame(pca_result$x[, 1:2])
+pca_data$Country <- country
+pca_data$Cluster <- as.factor(km_final$cluster)
+
+# Menghitung persentase variansi yang dijelaskan PC1 dan PC2
+var_exp <- summary(pca_result)$importance[2, 1:2] * 100
+
+# Warna untuk tiap cluster
+colors_cluster <- c("1" = "#E74C3C", "2" = "#2ECC71", "3" = "#3498DB")
+
+# Membuat scatter plot PCA dengan label nama negara
+ggplot(pca_data, aes(x = PC1, y = PC2, color = Cluster, label = Country)) +
+  geom_point(size = 3, alpha = 0.85) +          # titik per negara
+  geom_text(size = 2.2, vjust = -0.7,            # label nama negara
+            alpha = 0.75, show.legend = FALSE) +
+  scale_color_manual(values = colors_cluster) +  # warna manual per cluster
+  labs(
+    title = "Visualisasi Cluster Negara (PCA 2D)",
+    x     = sprintf("PC1 (%.1f%% variance)", var_exp[1]),
+    y     = sprintf("PC2 (%.1f%% variance)", var_exp[2])
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "right")
+```
+
+```{r}
+# SILHOUTE PLOT
+# Silhouette plot menampilkan skor per negara per cluster
+# Bar panjang ke kanan = negara cocok di clusternya
+# Bar pendek atau ke kiri = negara mungkin salah cluster
+fviz_silhouette(sil_obj,
+                palette    = c("#E74C3C", "#2ECC71", "#3498DB"),
+                ggtheme    = theme_minimal()) +
+  labs(title = "Silhouette Plot per Negara (K = 3)")
+```
+
+```{r}
+# HEATMAP
+short_names <- c("Safety", "Freedom", "Governance", "Social Capital",
+                 "Investment", "Enterprise", "Market Access",
+                 "Economic", "Living", "Health", "Education", "Environment")
+
+# Menghitung rata-rata Z-score setiap fitur per cluster
+# Nilai positif → di atas rata-rata global; negatif → di bawah rata-rata global
+cluster_means <- t(sapply(1:k_opt, function(c) {
+  colMeans(X_scaled[km_final$cluster == c, , drop = FALSE])
+}))
+rownames(cluster_means) <- paste("Cluster", 1:k_opt)
+colnames(cluster_means) <- short_names
+
+# Membuat heatmap dengan warna merah (rendah) → kuning → hijau (tinggi)
+pheatmap(cluster_means,
+         display_numbers = TRUE,      # tampilkan angka Z-score di tiap sel
+         number_format   = "%.2f",    # format 2 desimal
+         color = colorRampPalette(c("#E74C3C", "#FFFFCC", "#2ECC71"))(50),
+         main            = "Karakteristik Rata-rata per Cluster (Z-score)",
+         angle_col       = 45,        # label kolom dimiringkan 45 derajat
+         fontsize        = 10,
+         cluster_rows    = FALSE,     # urutan baris tidak di-cluster ulang
+         cluster_cols    = FALSE)     # urutan kolom tidak di-cluster ulang
+```
+
+```{r}
+# PROFIL & KARAKTERISTIK TIAP CLUSTER
+# Menghitung rata-rata nilai ASLI (bukan Z-score) per cluster per fitur
+cluster_profile <- data %>%
+  group_by(Cluster) %>%
+  summarise(across(all_of(features), mean, na.rm = TRUE))
+# across() → terapkan fungsi mean ke semua kolom dalam features
+# na.rm = TRUE → abaikan nilai kosong (NA) saat menghitung rata-rata
+
+# Menghitung rata-rata global (semua negara) sebagai pembanding
+overall_mean <- colMeans(data[features], na.rm = TRUE)
+
+cat("\n", strrep("=", 65), "\n")
+cat("KARAKTERISTIK TIAP CLUSTER\n")
+cat(strrep("=", 65), "\n")
+
+for (c in 1:k_opt) {
+  negara <- country[km_final$cluster == c]  # daftar negara di cluster ini
+  cat(sprintf("\n%s\n", strrep("-", 65)))
+  cat(sprintf("CLUSTER %d  (%d negara)\n", c, length(negara)))
+  cat(strrep("-", 65), "\n")
+  cat("Negara:", paste(negara, collapse = ", "), "\n")
+  cat("\nRata-rata Indikator:\n")
+  for (feat in features) {
+    val <- as.numeric(cluster_profile[cluster_profile$Cluster == c, feat])
+    # Bandingkan nilai cluster dengan rata-rata global
+    tag <- ifelse(val > overall_mean[feat], "↑ di atas rata-rata", "↓ di bawah rata-rata")
+    cat(sprintf("  %-32s : %7.2f  (%s)\n", feat, val, tag))
+  }
+}
+
+cat(sprintf("\n%s\n", strrep("-", 65)))
+cat("Rata-rata Global (pembanding):\n")
+for (feat in features) {
+  cat(sprintf("  %-32s : %7.2f\n", feat, overall_mean[feat]))
+}
+```
+
+```{r}
+# RINGKASAN HASIL CLUSTERING
+cat("\n", strrep("=", 65), "\n")
+cat("RINGKASAN HASIL CLUSTERING\n")
+cat(strrep("=", 65), "\n")
+for (c in 1:k_opt) {
+  negara <- country[km_final$cluster == c]
+  cat(sprintf("\nCluster %d (%d negara):\n", c, length(negara)))
+  cat(paste(negara, collapse = ", "), "\n")
+}
+```
+
+```{r}
+# DATAFRAME PETA
+cluster_df <- data.frame(
+  Country = country,
+  Cluster = as.character(km_final$cluster),
+  Score = data$AveragScore
+)
+
+# Menghitung rata-rata tiap variabel pada setiap cluster
+tabel_cluster <- data %>%
+  group_by(Cluster) %>%
+  summarise(
+    across(
+      all_of(features),
+      ~ round(mean(.x, na.rm = TRUE), 2)
+    )
+  )
+
+# Menghitung rata-rata
+rata_global <- data %>%
+  summarise(
+    across(
+      all_of(features),
+      ~ round(mean(.x, na.rm = TRUE), 2)
+    )
+  )
+
+# Menambahkan label
+rata_global <- cbind(
+  Cluster = "Global",
+  rata_global
+)
+
+# Menggabungkan tabel cluster 
+tabel_perbandingan <- bind_rows(
+  tabel_cluster,
+  rata_global
+)
+
+tabel_perbandingan
+```
+
+```{r}
+# Ranking cluster berdasarkan rata-rata skor
+cluster_rank <- cluster_df %>%
+  group_by(Cluster) %>%
+  summarise(
+    mean_score = mean(Score, na.rm = TRUE)
+  ) %>%
+  arrange(mean_score)
+
+cluster_rank
+```
+
+```{r}
+# LABEL CLUSTER BERDASARKAN SKOR
+cluster_df <- cluster_df %>%
+  mutate(
+    Cluster_Label = case_when(
+      Cluster == cluster_rank$Cluster[1]
+      ~ "Cluster Rentan",
+
+      Cluster == cluster_rank$Cluster[2]
+      ~ "Cluster Berkembang",
+
+      Cluster == cluster_rank$Cluster[3]
+      ~ "Cluster Sejahtera"
+    )
+  )
+
+cluster_df
+```
+
+```{r}
+# PETA DUNIA
+# Ambil peta dunia
+world <- ne_countries(
+  scale = "medium",
+  returnclass = "sf"
+)
+
+# Data cluster
+map_data <- cluster_df %>%
+  mutate(
+    Country = trimws(Country),
+
+    # Ubah nama negara menjadi kode ISO3
+    iso3 = countrycode(
+      Country,
+      origin = "country.name",
+      destination = "iso3c",
+
+    # Perbaikan manual negara yang gagal / ambigu
+      custom_match = c(
+  "Guyana" = "GUY"), warn = FALSE
+)
+      )
+
+
+# Cek negara yang gagal dikonversi
+map_data %>%
+  filter(is.na(iso3))
+
+# Join menggunakan ISO3
+map_cluster <- world %>%
+  left_join(
+    map_data,
+    by = c("iso_a3" = "iso3")
+  )
+
+# Cek hasil join
+table(is.na(map_cluster$Cluster))
+```
+
+```{r}
+# VISUALISASI 
+ggplot(map_cluster) +
+
+  geom_sf(
+    aes(fill = Cluster_Label),
+    color = "white",
+    linewidth = 0.1
+  ) +
+
+  scale_fill_manual(
+    values = c(
+      "Cluster Rentan" = "#E74C3C",
+      "Cluster Berkembang" = "#F1C40F",
+      "Cluster Sejahtera" = "#2ECC71"
+    ),
+    na.value = "gray90",
+    name = "Cluster"
+  ) +
+
+  labs(
+    title = "Peta Dunia Hasil Clustering",
+    subtitle = "K-Means Clustering Berdasarkan Prosperity Index",
+    caption = "Abu-abu = data tidak tersedia"
+  ) +
+
+  theme_minimal() +
+
+  theme(
+    plot.title = element_text(
+      face = "bold",
+      size = 16,
+      hjust = 0.5
+    ),
+
+    plot.subtitle = element_text(
+      hjust = 0.5
+    ),
+
+    legend.position = "bottom"
+  )
+```
+
