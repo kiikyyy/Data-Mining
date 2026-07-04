@@ -1,0 +1,149 @@
+---
+title: "Tugas 1 PDM"
+author: "Kelompok C Kelas A"
+date: "2026-03-08"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+---
+
+```{r}
+library(dplyr)
+library(readxl)
+library(rpart)
+library(rpart.plot)
+```
+
+```{r}
+# MEMBACA DATA
+data <- read_excel("C:/Users/User/Downloads/app_data.xlsx")
+data
+```
+
+```{r}
+# CEK TIPE DATA
+str(data)
+```
+```{r}
+# MENGUBAH VARIABEL BMI DARI CHARACTER MENJADI NUMERIC
+# karena BMI harus berupa angka untuk analisis
+data$BMI <- as.numeric(data$BMI)
+
+# MENGHAPUS BARIS YANG SEMUA NILAINYA NA
+# baris tanpa informasi tidak bisa dipakai untuk modeling
+data <- data[rowSums(is.na(data)) != ncol(data), ]
+
+# MENGHAPUS VARIABEL DENGAN MISSING VALUE > 50%
+# variabel dengan terlalu banyak NA biasanya tidak informatif
+data <- data[, colMeans(is.na(data)) < 0.5]
+
+data
+```
+
+```{r}
+# MENGUBAH SEMUA VARIABEL KATEGORIK MENJADI FACTOR
+data <- data %>%
+  mutate(across(where(is.character), as.factor))
+```
+
+```{r}
+# IMPUTASI MEDIAN DAN MODUS
+# NUMERIK -> MEDIAN
+# KATEGORIK -> MODUS
+
+# Fungsi Modus
+get_mode <- function(v){
+  uniqv <- unique(na.omit(v))
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+data <- data %>%
+  mutate(across(where(is.numeric),
+                ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+data <- data %>%
+  mutate(across(where(is.factor),
+                ~ ifelse(is.na(.), get_mode(.), .)))
+
+data
+```
+
+
+```{r}
+# MENGHAPUS VARIABEL YANG TIDAK DIGUNAKAN
+data <- data[, !(names(data) %in% c(
+  "Management",
+  "Severity",
+  "US_Number",
+  "Length_of_Stay", 
+  "Diagnosis_Presumptive"
+))]
+
+data
+```
+
+```{r}
+library(FSelectorRcpp)
+
+# Hitung Information Gain
+ig <- information_gain(Diagnosis ~ ., data)
+ig_sorted <- ig[order(-ig$importance), ]
+ig_sorted
+
+top6_vars <- ig_sorted$attributes[1:10]
+top6_vars
+
+data_model <- data[, c("Diagnosis", top6_vars)]
+```
+
+
+```{r}
+# MEMBAGI DATA MENJADI TRAINING DAN TESTING
+set.seed(123)
+train_index <- sample(1:nrow(data_model), 0.8*nrow(data_model))
+trainData <- data_model[train_index, ]
+testData  <- data_model[-train_index, ]
+```
+
+```{r}
+# MEMBUAT MODEL DECISION TREE
+model_dt <- rpart(
+  Diagnosis ~ .,
+  data = trainData,
+  method = "class",
+  parms = list(split = "information")
+)
+
+rpart.plot(
+  model_dt,
+  type = 2,
+  extra = 104,
+  fallen.leaves = TRUE,
+  box.palette = c("#2ECC71","#E74C3C"),
+  shadow.col = "gray",
+  tweak = 1.1,
+  main = "Pohon Keputusan Diagnosis Apendisitis"
+)
+```
+```{r}
+# Prediksi data training
+pred_train <- predict(model_dt, trainData, type = "class")
+
+# Confusion matrix training
+print("DATA TRAINING")
+table(Predicted = pred_train, Actual = trainData$Diagnosis)
+
+# Accuracy training
+mean(pred_train == trainData$Diagnosis)
+
+# Prediksi data testing
+pred_test <- predict(model_dt, testData, type = "class")
+
+# Confusion matrix testing
+print("DATA TESTING")
+table(Predicted = pred_test, Actual = testData$Diagnosis)
+
+# Accuracy testing
+mean(pred_test == testData$Diagnosis)
+```
