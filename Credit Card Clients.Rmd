@@ -1,0 +1,856 @@
+---
+title: "Credit Card Clients - TBP Pengantar Data Mining"
+author: "Kelompok D"
+date: "2026-04-25"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# STEP 1: Load Libraries
+# Memuat semua package yang dibutuhkan untuk analisis
+```{r}
+library(dplyr)
+library(conflicted)
+conflict_prefer_all("dplyr", quiet = TRUE)
+
+library(readxl)
+library(caret)
+library(recipes)
+library(themis)
+library(pROC)
+library(rpart)
+library(rpart.plot)
+library(xgboost)
+library(tidyr)
+
+if ("package:plyr" %in% search()) detach("package:plyr", unload = TRUE)
+library(dplyr)
+conflict_prefer_all("dplyr", quiet = TRUE)
+```
+
+# STEP 2: Load Dataset
+# Membaca dataset utama, lalu menyesuaikan nama variabel target
+# dan menghapus ID karena tidak digunakan sebagai prediktor
+```{r}
+data_raw <- read_excel("C:/Users/User/Documents/KULIAH/sem 4/pdm/default of credit card clients.xls", skip = 1)
+
+names(data_raw)[names(data_raw) == "default payment next month"] <- "PAYMENT"
+data_raw <- data_raw %>% select(-ID)
+```
+
+# STEP 3: Struktur Data
+# Menampilkan struktur data untuk memahami tipe variabel,
+# jumlah observasi, dan bentuk awal dataset
+```{r}
+cat("Struktur Data Awal:\n")
+str(data_raw)
+
+cat("\nRingkasan Data:\n")
+summary(data_raw)
+
+cat("\nDimensi Data:\n")
+print(dim(data_raw))
+```
+
+# STEP 4: Cleaning Data
+# Membersihkan kategori yang tidak valid pada beberapa variabel
+# agar data lebih siap dipakai untuk modeling
+```{r}
+data_clean <- data_raw %>%
+  mutate(
+    EDUCATION = case_when(
+      EDUCATION %in% c(0, 5, 6) ~ 4,
+      TRUE ~ EDUCATION
+    ),
+    MARRIAGE = case_when(
+      MARRIAGE == 0 ~ 3,
+      TRUE ~ MARRIAGE
+    )
+  )
+```
+
+# STEP 5: Variable Types
+# Mengubah variabel kategorikal menjadi factor,
+# termasuk target PAYMENT menjadi dua kelas yang jelas
+```{r}
+convert_to_factor <- function(df) {
+  df$SEX       <- factor(df$SEX)
+  df$EDUCATION <- factor(df$EDUCATION)
+  df$MARRIAGE  <- factor(df$MARRIAGE)
+  df$PAYMENT   <- factor(
+    df$PAYMENT,
+    levels = c(0, 1),
+    labels = c("No_Default", "Default")
+  )
+  return(df)
+}
+
+data_clean <- convert_to_factor(data_clean)
+
+cat("\nDistribusi Target:\n")
+print(table(data_clean$PAYMENT))
+print(round(prop.table(table(data_clean$PAYMENT)), 4))
+```
+
+# STEP 6: Feature Engineering
+# Membuat fitur-fitur baru yang diharapkan dapat menangkap
+# perilaku pembayaran, keterlambatan, rasio, tren, dan interaksi variabel
+```{r}
+data_feat <- data_clean %>%
+  mutate(
+    UTILIZATION_1 = BILL_AMT1 / (LIMIT_BAL + 1),
+    UTILIZATION_6 = BILL_AMT6 / (LIMIT_BAL + 1),
+    
+    LATE_SCORE = pmax(0, PAY_0) + pmax(0, PAY_2) + pmax(0, PAY_3) +
+      pmax(0, PAY_4) + pmax(0, PAY_5) + pmax(0, PAY_6),
+    
+    TOTAL_LATE = (PAY_0 > 0) + (PAY_2 > 0) + (PAY_3 > 0) +
+      (PAY_4 > 0) + (PAY_5 > 0) + (PAY_6 > 0),
+    
+    MAX_LATE = pmax(PAY_0, PAY_2, PAY_3, PAY_4, PAY_5, PAY_6),
+    
+    AVG_BILL = rowMeans(select(., starts_with("BILL_AMT"))),
+    AVG_PAY  = rowMeans(select(., starts_with("PAY_AMT"))),
+    
+    BILL_TOTAL = rowSums(select(., starts_with("BILL_AMT"))),
+    PAY_TOTAL  = rowSums(select(., starts_with("PAY_AMT"))),
+    
+    REPAY_RATIO   = PAY_TOTAL / (BILL_TOTAL + 1),
+    NET_PAY_RATIO = AVG_PAY / (abs(AVG_BILL) + 1),
+    
+    BILL_TREND = BILL_AMT1 - BILL_AMT6,
+    PAY_TREND  = PAY_AMT1 - PAY_AMT6,
+    
+    LIMIT_PER_AGE = LIMIT_BAL / (AGE + 1),
+    
+    INTERACTION_LIMIT_BILL = LIMIT_BAL * UTILIZATION_1,
+    INTERACTION_PAY_BILL   = AVG_PAY * AVG_BILL,
+    INTERACTION_LATE_BILL  = LATE_SCORE * AVG_BILL
+  )
+```
+
+# STEP 7: Split Data Training dan Testing
+# Membagi data menjadi training dan testing.
+# Cross-validation nantinya hanya dilakukan pada data training
+# agar evaluasi akhir tetap jujur pada data testing
+```{r}
+set.seed(123)
+idx_train <- createDataPartition(data_feat$PAYMENT, p = 0.80, list = FALSE)
+
+train_base <- data_clean[idx_train, ]
+test_base  <- data_clean[-idx_train, ]
+
+train_tuned <- data_feat[idx_train, ]
+test_tuned  <- data_feat[-idx_train, ]
+
+cat("\nJumlah Data Training:", nrow(train_tuned), "\n")
+cat("Jumlah Data Testing :", nrow(test_tuned), "\n")
+```
+# STEP 8: Cross-Validation Control
+# Menentukan skema cross-validation untuk tuning model
+# di dalam data training agar risiko overfitting berkurang
+```{r}
+cv_control <- trainControl(
+  method = "repeatedcv",
+  number = 5,
+  repeats = 2,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+```
+
+# STEP 9: Helper Functions
+# Menyusun fungsi-fungsi bantu untuk threshold tuning,
+# evaluasi metrik, analisis confusion matrix, dan perbandingan hasil
+```{r}
+tune_threshold_from_cv <- function(pred_df, positive_class = "Default",
+                                   thresholds = seq(0.20, 0.70, by = 0.01)) {
+  results <- data.frame()
+  
+  for (t in thresholds) {
+    pred_label <- factor(
+      ifelse(pred_df[[positive_class]] > t, positive_class, "No_Default"),
+      levels = c("No_Default", positive_class)
+    )
+    
+    cm <- confusionMatrix(pred_label, pred_df$obs, positive = positive_class)
+    
+    precision <- unname(cm$byClass["Precision"])
+    recall    <- unname(cm$byClass["Recall"])
+    f1        <- unname(cm$byClass["F1"])
+    spec      <- unname(cm$byClass["Specificity"])
+    bal_acc   <- mean(c(recall, spec))
+    g_mean    <- sqrt(recall * spec)
+    
+    results <- rbind(results, data.frame(
+      threshold = t,
+      Precision = precision,
+      Recall = recall,
+      F1 = f1,
+      Specificity = spec,
+      Balanced_Accuracy = bal_acc,
+      G_Mean = g_mean,
+      Score = 0.35 * recall + 0.20 * precision + 0.20 * f1 + 0.15 * bal_acc + 0.10 * g_mean
+    ))
+  }
+  
+  results <- results %>% arrange(desc(Score))
+  return(list(best_threshold = results$threshold[1], table = results))
+}
+
+tune_threshold_from_train <- function(prob_vec, actual,
+                                      thresholds = seq(0.20, 0.70, by = 0.01)) {
+  results <- data.frame()
+  
+  for (t in thresholds) {
+    pred_label <- factor(
+      ifelse(prob_vec > t, "Default", "No_Default"),
+      levels = c("No_Default", "Default")
+    )
+    
+    cm <- confusionMatrix(pred_label, actual, positive = "Default")
+    
+    precision <- unname(cm$byClass["Precision"])
+    recall    <- unname(cm$byClass["Recall"])
+    f1        <- unname(cm$byClass["F1"])
+    spec      <- unname(cm$byClass["Specificity"])
+    bal_acc   <- mean(c(recall, spec))
+    g_mean    <- sqrt(recall * spec)
+    
+    results <- rbind(results, data.frame(
+      threshold = t,
+      Precision = precision,
+      Recall = recall,
+      F1 = f1,
+      Specificity = spec,
+      Balanced_Accuracy = bal_acc,
+      G_Mean = g_mean,
+      Score = 0.35 * recall + 0.20 * precision + 0.20 * f1 + 0.15 * bal_acc + 0.10 * g_mean
+    ))
+  }
+  
+  results <- results %>% arrange(desc(Score))
+  return(list(best_threshold = results$threshold[1], table = results))
+}
+
+calc_metrics <- function(prob_vec, actual, threshold = 0.5) {
+  pred <- factor(
+    ifelse(prob_vec > threshold, "Default", "No_Default"),
+    levels = c("No_Default", "Default")
+  )
+  
+  cm <- confusionMatrix(pred, actual, positive = "Default")
+  
+  sens <- unname(cm$byClass["Sensitivity"])
+  spec <- unname(cm$byClass["Specificity"])
+  bal_acc <- mean(c(sens, spec))
+  g_mean <- sqrt(sens * spec)
+  
+  roc_obj <- roc(actual, prob_vec, levels = c("No_Default", "Default"), quiet = TRUE)
+  auc_val <- as.numeric(auc(roc_obj))
+  
+  metrics <- data.frame(
+    Metric = c(
+      "Accuracy", "Balanced Accuracy", "Precision", "Recall",
+      "F1", "Specificity", "Sensitivity", "G-Mean", "AUC"
+    ),
+    Value = round(c(
+      cm$overall["Accuracy"],
+      bal_acc,
+      unname(cm$byClass["Precision"]),
+      unname(cm$byClass["Recall"]),
+      unname(cm$byClass["F1"]),
+      spec,
+      sens,
+      g_mean,
+      auc_val
+    ), 4)
+  )
+  
+  return(list(metrics = metrics, roc = roc_obj, cm = cm, pred = pred))
+}
+
+analyze_confusion <- function(cm_obj, model_name) {
+  tn <- as.numeric(cm_obj$table["No_Default", "No_Default"])
+  fp <- as.numeric(cm_obj$table["Default", "No_Default"])
+  fn <- as.numeric(cm_obj$table["No_Default", "Default"])
+  tp <- as.numeric(cm_obj$table["Default", "Default"])
+  
+  fp_rate <- ifelse((fp + tn) > 0, fp / (fp + tn), NA)
+  fn_rate <- ifelse((fn + tp) > 0, fn / (fn + tp), NA)
+  
+  summary_df <- data.frame(
+    Model = model_name,
+    TN = tn,
+    FP = fp,
+    FN = fn,
+    TP = tp,
+    FP_Rate = round(fp_rate, 4),
+    FN_Rate = round(fn_rate, 4),
+    TN_gt_FP = tn > fp,
+    TP_gt_FN = tp > fn
+  )
+  
+  cat("\nerror analysis:", model_name, "\n")
+  cat("TN:", tn, "| FP:", fp, "| FN:", fn, "| TP:", tp, "\n")
+  cat("FP Rate:", round(fp_rate, 4), "| FN Rate:", round(fn_rate, 4), "\n")
+  
+  if (fn > fp) {
+    cat("insight: model lebih sering miss kasus default\n")
+  } else if (fp > fn) {
+    cat("insight: model lebih sering over-predict default\n")
+  } else {
+    cat("insight: fp dan fn seimbang\n")
+  }
+  
+  return(summary_df)
+}
+
+compare_train_test <- function(train_metrics, test_metrics, model_name) {
+  out <- train_metrics %>%
+    rename(Train = Value) %>%
+    left_join(test_metrics %>% rename(Test = Value), by = "Metric") %>%
+    mutate(
+      Gap = round(Train - Test, 4),
+      Model = model_name
+    ) %>%
+    select(Model, Metric, Train, Test, Gap)
+  
+  cat("\ntrain vs test:", model_name, "\n")
+  print(out)
+  
+  return(out)
+}
+
+plot_confusion_matrix <- function(cm_obj, model_name) {
+  tbl <- as.data.frame(cm_obj$table)
+  colnames(tbl) <- c("Predicted", "Actual", "Freq")
+  
+  total <- sum(tbl$Freq)
+  tbl$Pct <- round(tbl$Freq / total * 100, 1)
+  
+  tbl$CellLabel <- ifelse(
+    tbl$Predicted == "No_Default" & tbl$Actual == "No_Default", "TN",
+    ifelse(tbl$Predicted == "Default" & tbl$Actual == "Default", "TP",
+           ifelse(tbl$Predicted == "Default" & tbl$Actual == "No_Default", "FP", "FN"))
+  )
+  
+  tbl$Fill <- ifelse(tbl$CellLabel %in% c("TP", "TN"), "#2ECC71", "#E74C3C")
+  
+  opar <- par(no.readonly = TRUE)
+  on.exit(par(opar))
+  
+  plot.new()
+  plot.window(xlim = c(0, 1), ylim = c(0, 1))
+  title(main = paste("Confusion Matrix -", model_name), cex.main = 1.1)
+  
+  xs <- c(0.15, 0.55)
+  ys <- c(0.55, 0.15)
+  
+  for (i in seq_len(nrow(tbl))) {
+    xi <- if (tbl$Predicted[i] == "No_Default") xs[1] else xs[2]
+    yi <- if (tbl$Actual[i] == "No_Default") ys[1] else ys[2]
+    rect(xi, yi, xi + 0.35, yi + 0.35, col = tbl$Fill[i], border = "white", lwd = 2)
+    text(xi + 0.175, yi + 0.22, labels = tbl$CellLabel[i], col = "white", font = 2, cex = 1.3)
+    text(xi + 0.175, yi + 0.13, labels = tbl$Freq[i], col = "white", font = 2, cex = 1.5)
+    text(xi + 0.175, yi + 0.05, labels = paste0("(", tbl$Pct[i], "%)"), col = "white", cex = 0.9)
+  }
+  
+  text(0.325, 0.96, "Actual: No_Default", cex = 0.95, font = 2)
+  text(0.725, 0.96, "Actual: Default", cex = 0.95, font = 2)
+  text(0.07, 0.725, "Pred: No_Default", cex = 0.9, font = 2, srt = 90)
+  text(0.07, 0.325, "Pred: Default", cex = 0.9, font = 2, srt = 90)
+}
+```
+
+# STEP 10: Menyediakan tempat untuk menyimpan rekap hasil baseline,
+# tuned, error analysis, dan gap train-test
+```{r}
+comparison_test <- data.frame()
+error_comparison <- data.frame() 
+train_test_gap <- data.frame()
+```
+
+# STEP 11: Baseline Model
+# Membangun model baseline tanpa feature engineering,
+# tanpa SMOTE, tanpa class weighting, dan threshold default 0.5
+```{r}
+cat("\nTraining Baseline Model\n")
+```
+# Baseline Decision Tree
+```{r}
+model_dt_base <- rpart(
+  PAYMENT ~ .,
+  data = train_base,
+  method = "class",
+  control = rpart.control(cp = 0.01)
+)
+
+prob_dt_base_train <- predict(model_dt_base, newdata = train_base, type = "prob")[, "Default"]
+prob_dt_base_test  <- predict(model_dt_base, newdata = test_base, type = "prob")[, "Default"]
+
+train_result_dt_base <- calc_metrics(prob_dt_base_train, train_base$PAYMENT, threshold = 0.5)
+test_result_dt_base  <- calc_metrics(prob_dt_base_test, test_base$PAYMENT, threshold = 0.5)
+
+error_dt_base <- analyze_confusion(test_result_dt_base$cm, "Decision Tree - Baseline")
+tt_dt_base <- compare_train_test(train_result_dt_base$metrics, test_result_dt_base$metrics, "Decision Tree - Baseline")
+
+comparison_test <- bind_rows(
+  comparison_test,
+  data.frame(Model = "Decision Tree", Version = "Baseline",
+             Metric = test_result_dt_base$metrics$Metric,
+             Value = test_result_dt_base$metrics$Value)
+)
+error_comparison <- bind_rows(error_comparison, error_dt_base)
+train_test_gap <- bind_rows(train_test_gap, tt_dt_base)
+```
+# Baseline Logistic Regression
+```{r}
+rec_lr_base <- recipe(PAYMENT ~ ., data = train_base) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors())
+
+prep_lr_base <- prep(rec_lr_base)
+train_lr_base <- juice(prep_lr_base)
+test_lr_base  <- bake(prep_lr_base, new_data = test_base)
+
+model_lr_base <- glm(PAYMENT ~ ., data = train_lr_base, family = "binomial")
+
+prob_lr_base_train <- predict(model_lr_base, newdata = train_lr_base, type = "response")
+prob_lr_base_test  <- predict(model_lr_base, newdata = test_lr_base, type = "response")
+
+train_result_lr_base <- calc_metrics(prob_lr_base_train, train_lr_base$PAYMENT, threshold = 0.5)
+test_result_lr_base  <- calc_metrics(prob_lr_base_test, test_lr_base$PAYMENT, threshold = 0.5)
+
+error_lr_base <- analyze_confusion(test_result_lr_base$cm, "Logistic Regression - Baseline")
+tt_lr_base <- compare_train_test(train_result_lr_base$metrics, test_result_lr_base$metrics, "Logistic Regression - Baseline")
+
+comparison_test <- bind_rows(
+  comparison_test,
+  data.frame(Model = "Logistic Regression", Version = "Baseline",
+             Metric = test_result_lr_base$metrics$Metric,
+             Value = test_result_lr_base$metrics$Value)
+)
+error_comparison <- bind_rows(error_comparison, error_lr_base)
+train_test_gap <- bind_rows(train_test_gap, tt_lr_base)
+```
+
+# Baseline XGBoost
+```{r}
+rec_xgb_base <- recipe(PAYMENT ~ ., data = train_base) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors())
+
+prep_xgb_base <- prep(rec_xgb_base)
+train_xgb_base <- juice(prep_xgb_base)
+test_xgb_base  <- bake(prep_xgb_base, new_data = test_base)
+
+y_train_base <- ifelse(train_xgb_base$PAYMENT == "Default", 1, 0)
+y_test_base  <- ifelse(test_xgb_base$PAYMENT == "Default", 1, 0)
+
+x_train_base <- train_xgb_base %>% select(-PAYMENT) %>% as.matrix()
+x_test_base  <- test_xgb_base %>% select(-PAYMENT) %>% as.matrix()
+
+dtrain_base <- xgb.DMatrix(data = x_train_base, label = y_train_base)
+dtest_base  <- xgb.DMatrix(data = x_test_base, label = y_test_base)
+
+params_base <- list(
+  objective = "binary:logistic",
+  eval_metric = "auc"
+)
+
+set.seed(123)
+model_xgb_base <- xgb.train(
+  params = params_base,
+  data = dtrain_base,
+  nrounds = 100,
+  verbose = 0
+)
+
+prob_xgb_base_train <- predict(model_xgb_base, x_train_base)
+prob_xgb_base_test  <- predict(model_xgb_base, x_test_base)
+
+train_result_xgb_base <- calc_metrics(prob_xgb_base_train, train_xgb_base$PAYMENT, threshold = 0.5)
+test_result_xgb_base  <- calc_metrics(prob_xgb_base_test, test_xgb_base$PAYMENT, threshold = 0.5)
+
+error_xgb_base <- analyze_confusion(test_result_xgb_base$cm, "XGBoost - Baseline")
+tt_xgb_base <- compare_train_test(train_result_xgb_base$metrics, test_result_xgb_base$metrics, "XGBoost - Baseline")
+
+comparison_test <- bind_rows(
+  comparison_test,
+  data.frame(Model = "XGBoost", Version = "Baseline",
+             Metric = test_result_xgb_base$metrics$Metric,
+             Value = test_result_xgb_base$metrics$Value)
+)
+error_comparison <- bind_rows(error_comparison, error_xgb_base)
+train_test_gap <- bind_rows(train_test_gap, tt_xgb_base)
+```
+# STEP 12: Tuned Model
+# Membangun model yang telah dioptimasi dengan feature engineering
+# yang diterapkan konsisten, serta tuning hyperparameter dan threshold
+```{r}
+cat("\nTraining Tuned Model\n")
+
+# recipe dasar untuk semua model tuned
+rec_base <- recipe(PAYMENT ~ ., data = train_tuned) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors())
+```
+# Tuned Decision Tree
+```{r}
+rec_dt <- rec_base %>%
+  step_smote(PAYMENT, over_ratio = 0.3)
+
+grid_dt <- expand.grid(cp = seq(0.0005, 0.01, by = 0.0005))
+
+set.seed(123)
+model_dt <- train(
+  rec_dt,
+  data = train_tuned,
+  method = "rpart",
+  trControl = cv_control,
+  tuneGrid = grid_dt,
+  metric = "ROC",
+  parms = list(split = "information"),
+  control = rpart.control(
+    maxdepth = 8,
+    minsplit = 20,
+    minbucket = 7
+  )
+)
+
+pred_cv_dt <- model_dt$pred
+best_cp_dt <- model_dt$bestTune$cp
+pred_cv_dt <- pred_cv_dt[pred_cv_dt$cp == best_cp_dt, ]
+
+thres_dt <- tune_threshold_from_cv(pred_cv_dt)
+best_t_dt <- thres_dt$best_threshold
+
+prob_dt_train <- predict(model_dt, newdata = train_tuned, type = "prob")[, "Default"]
+prob_dt_test  <- predict(model_dt, newdata = test_tuned, type = "prob")[, "Default"]
+
+train_result_dt <- calc_metrics(prob_dt_train, train_tuned$PAYMENT, best_t_dt)
+test_result_dt  <- calc_metrics(prob_dt_test, test_tuned$PAYMENT, best_t_dt)
+
+error_dt <- analyze_confusion(test_result_dt$cm, "Decision Tree - Tuned")
+tt_dt <- compare_train_test(train_result_dt$metrics, test_result_dt$metrics, "Decision Tree - Tuned")
+
+comparison_test <- bind_rows(
+  comparison_test,
+  data.frame(Model = "Decision Tree", Version = "Tuned",
+             Metric = test_result_dt$metrics$Metric,
+             Value = test_result_dt$metrics$Value)
+)
+error_comparison <- bind_rows(error_comparison, error_dt)
+train_test_gap <- bind_rows(train_test_gap, tt_dt)
+```
+# Tuned Logistic Regression
+```{r}
+rec_lr <- rec_base %>%
+  step_corr(all_numeric_predictors(), threshold = 0.9) %>%
+  step_YeoJohnson(all_numeric_predictors()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_smote(PAYMENT, over_ratio = 0.3)
+
+set.seed(123)
+model_lr <- train(
+  rec_lr,
+  data = train_tuned,
+  method = "glm",
+  family = "binomial",
+  trControl = cv_control,
+  metric = "ROC"
+)
+
+pred_cv_lr <- model_lr$pred
+
+thres_lr <- tune_threshold_from_cv(pred_cv_lr)
+best_t_lr <- thres_lr$best_threshold
+
+prob_lr_train <- predict(model_lr, newdata = train_tuned, type = "prob")[, "Default"]
+prob_lr_test  <- predict(model_lr, newdata = test_tuned, type = "prob")[, "Default"]
+
+train_result_lr <- calc_metrics(prob_lr_train, train_tuned$PAYMENT, best_t_lr)
+test_result_lr  <- calc_metrics(prob_lr_test, test_tuned$PAYMENT, best_t_lr)
+
+error_lr <- analyze_confusion(test_result_lr$cm, "Logistic Regression - Tuned")
+tt_lr <- compare_train_test(train_result_lr$metrics, test_result_lr$metrics, "Logistic Regression - Tuned")
+
+comparison_test <- bind_rows(
+  comparison_test,
+  data.frame(Model = "Logistic Regression", Version = "Tuned",
+             Metric = test_result_lr$metrics$Metric,
+             Value = test_result_lr$metrics$Value)
+)
+error_comparison <- bind_rows(error_comparison, error_lr)
+train_test_gap <- bind_rows(train_test_gap, tt_lr)
+```
+
+# Tuned XGBoost
+```{r}
+rec_xgb <- rec_base
+
+prep_xgb <- prep(rec_xgb)
+train_xgb <- juice(prep_xgb)
+test_xgb  <- bake(prep_xgb, new_data = test_tuned)
+
+y_train <- ifelse(train_xgb$PAYMENT == "Default", 1, 0)
+y_test  <- ifelse(test_xgb$PAYMENT == "Default", 1, 0)
+
+x_train <- train_xgb %>% select(-PAYMENT) %>% as.matrix()
+x_test  <- test_xgb %>% select(-PAYMENT) %>% as.matrix()
+
+dtrain <- xgb.DMatrix(data = x_train, label = y_train)
+dtest  <- xgb.DMatrix(data = x_test, label = y_test)
+
+n_no_xgb  <- sum(y_train == 0)
+n_yes_xgb <- sum(y_train == 1)
+scale_pos_weight <- n_no_xgb / n_yes_xgb
+
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "auc",
+  max_depth = 5,
+  eta = 0.05,
+  gamma = 0,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  min_child_weight = 5,
+  scale_pos_weight = scale_pos_weight
+)
+
+set.seed(123)
+cv_model <- xgb.cv(
+  params = params,
+  data = dtrain,
+  nrounds = 200,
+  nfold = 5,
+  early_stopping_rounds = 20,
+  verbose = 0
+)
+
+best_rounds <- cv_model$best_iteration
+if (is.null(best_rounds) || is.na(best_rounds)) best_rounds <- 100
+
+cat("Best rounds:", best_rounds, "\n")
+
+model_xgb <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = best_rounds,
+  watchlist = list(train = dtrain),
+  verbose = 1
+)
+
+prob_xgb_train <- predict(model_xgb, x_train)
+prob_xgb_test  <- predict(model_xgb, x_test)
+
+thres_xgb <- tune_threshold_from_train(prob_xgb_train, train_xgb$PAYMENT)
+best_t_xgb <- thres_xgb$best_threshold
+
+train_result_xgb <- calc_metrics(prob_xgb_train, train_xgb$PAYMENT, best_t_xgb)
+test_result_xgb  <- calc_metrics(prob_xgb_test,  test_xgb$PAYMENT,  best_t_xgb)
+
+error_xgb <- analyze_confusion(test_result_xgb$cm, "XGBoost - Tuned")
+tt_xgb <- compare_train_test(train_result_xgb$metrics, test_result_xgb$metrics, "XGBoost - Tuned")
+
+comparison_test <- bind_rows(
+  comparison_test,
+  data.frame(Model = "XGBoost", Version = "Tuned",
+             Metric = test_result_xgb$metrics$Metric,
+             Value = test_result_xgb$metrics$Value)
+)
+error_comparison <- bind_rows(error_comparison, error_xgb)
+train_test_gap <- bind_rows(train_test_gap, tt_xgb)
+```
+# STEP 13: Perbandingan Baseline vs Tuned
+# Menyusun tabel perbandingan untuk melihat peningkatan performa
+# antara model baseline dan model yang telah dioptimasi
+```{r}
+cat("\nRekap Baseline vs Tuned\n")
+
+comparison_wide <- comparison_test %>%
+  pivot_wider(names_from = c(Model, Version), values_from = Value)
+
+print(comparison_wide)
+
+improvement_summary <- comparison_test %>%
+  filter(Metric %in% c("Accuracy", "Balanced Accuracy", "Precision", "Recall", "Specificity", "F1",   "G-Mean", "AUC")) %>%
+  pivot_wider(names_from = Version, values_from = Value) %>%
+  mutate(Improvement = round(Tuned - Baseline, 4)) %>%
+  arrange(Model, Metric)
+
+cat("\nRingkasan Improvement Tuned terhadap Baseline:\n")
+print(improvement_summary)
+```
+# STEP 14: Error Analysis Summary
+# Menampilkan ringkasan error agar terlihat fp dan fn
+# pada setiap model yang diuji
+```{r}
+cat("\nRekap Error Analisis:\n")
+print(error_comparison)
+
+cat("\nRekap Train vs Test Gap:\n")
+print(train_test_gap)
+```
+
+# STEP 15: Visualisasi
+# Menampilkan confusion matrix, roc curve, feature importance,
+# dan visual pendukung lainnya
+```{r}
+# Confusion Matrix Baseline
+plot_confusion_matrix(test_result_dt_base$cm, "Decision Tree - Baseline")
+plot_confusion_matrix(test_result_lr_base$cm, "Logistic Regression - Baseline")
+plot_confusion_matrix(test_result_xgb_base$cm, "XGBoost - Baseline")
+
+# Confusion Matrix Tuned
+plot_confusion_matrix(test_result_dt$cm, "Decision Tree - Tuned")
+plot_confusion_matrix(test_result_lr$cm, "Logistic Regression - Tuned")
+plot_confusion_matrix(test_result_xgb$cm, "XGBoost - Tuned")
+```
+```{r}
+# ROC Perbandingan Baseline
+plot(test_result_dt_base$roc, col = "steelblue", lwd = 2,
+     main = "ROC Kurva Perbandingan Model Awal")
+lines(test_result_lr_base$roc, col = "darkorange", lwd = 2)
+lines(test_result_xgb_base$roc, col = "purple", lwd = 2)
+abline(a = 1, b = -1, lty = 2, col = "gray")
+legend("bottomright",
+       legend = c(
+         paste("DT Base (AUC =", round(as.numeric(auc(test_result_dt_base$roc)), 3), ")"),
+         paste("LR Base (AUC =", round(as.numeric(auc(test_result_lr_base$roc)), 3), ")"),
+         paste("XGB Base (AUC =", round(as.numeric(auc(test_result_xgb_base$roc)), 3), ")")
+       ),
+       col = c("steelblue", "darkorange", "purple"),
+       lwd = 2)
+```
+```{r}
+# ROC Perbandingan Tuned
+plot(test_result_dt$roc, col = "steelblue", lwd = 2,
+     main = "ROC Kurva Perbandingan Model Akhir")
+lines(test_result_lr$roc, col = "darkorange", lwd = 2)
+lines(test_result_xgb$roc, col = "purple", lwd = 2)
+abline(a = 1, b = -1, lty = 2, col = "gray")
+legend("bottomright",
+       legend = c(
+         paste("DT Tuned (AUC =", round(as.numeric(auc(test_result_dt$roc)), 3), ")"),
+         paste("LR Tuned (AUC =", round(as.numeric(auc(test_result_lr$roc)), 3), ")"),
+         paste("XGB Tuned (AUC =", round(as.numeric(auc(test_result_xgb$roc)), 3), ")")
+       ),
+       col = c("steelblue", "darkorange", "purple"),
+       lwd = 2)
+```
+```{r}
+# Decision Tree Plot
+rpart.plot(
+  model_dt$finalModel,
+  type = 2,
+  extra = 104,
+  fallen.leaves = TRUE,
+  box.palette = c("#2ECC71", "#E74C3C"),
+  shadow.col = "gray",
+  main = "Decision Tree Model Akhir"
+)
+```
+
+```{r}
+# xgboost Feature Importance
+imp_xgb <- xgb.importance(model = model_xgb)
+xgb.plot.importance(imp_xgb[1:15, ], main = "Feature Importance - XGBoost Tuned") 
+```
+
+# STEP 16: Menyimpulkan model terbaik dan menampilkan metrik utamanya
+# untuk menjawab tujuan utama prediksi risiko gagal bayar
+```{r}
+cat("\nKesimpulan Akhir Model Utama\n")
+
+final_scores <- data.frame(
+  Model = c("Decision Tree", "Logistic Regression", "XGBoost"),
+  Recall = c(
+    test_result_dt$metrics$Value[test_result_dt$metrics$Metric == "Recall"],
+    test_result_lr$metrics$Value[test_result_lr$metrics$Metric == "Recall"],
+    test_result_xgb$metrics$Value[test_result_xgb$metrics$Metric == "Recall"]
+  ),
+  Precision = c(
+    test_result_dt$metrics$Value[test_result_dt$metrics$Metric == "Precision"],
+    test_result_lr$metrics$Value[test_result_lr$metrics$Metric == "Precision"],
+    test_result_xgb$metrics$Value[test_result_xgb$metrics$Metric == "Precision"]
+  ),
+  F1 = c(
+    test_result_dt$metrics$Value[test_result_dt$metrics$Metric == "F1"],
+    test_result_lr$metrics$Value[test_result_lr$metrics$Metric == "F1"],
+    test_result_xgb$metrics$Value[test_result_xgb$metrics$Metric == "F1"]
+  ),
+  Specificity = c(
+    test_result_dt$metrics$Value[test_result_dt$metrics$Metric == "Specificity"],
+    test_result_lr$metrics$Value[test_result_lr$metrics$Metric == "Specificity"],
+    test_result_xgb$metrics$Value[test_result_xgb$metrics$Metric == "Specificity"]
+  ),
+  Balanced_Accuracy = c(
+    test_result_dt$metrics$Value[test_result_dt$metrics$Metric == "Balanced Accuracy"],
+    test_result_lr$metrics$Value[test_result_lr$metrics$Metric == "Balanced Accuracy"],
+    test_result_xgb$metrics$Value[test_result_xgb$metrics$Metric == "Balanced Accuracy"]
+  ),
+  G_Mean = c(
+    test_result_dt$metrics$Value[test_result_dt$metrics$Metric == "G-Mean"],
+    test_result_lr$metrics$Value[test_result_lr$metrics$Metric == "G-Mean"],
+    test_result_xgb$metrics$Value[test_result_xgb$metrics$Metric == "G-Mean"]
+  ),
+  AUC = c(
+    test_result_dt$metrics$Value[test_result_dt$metrics$Metric == "AUC"],
+    test_result_lr$metrics$Value[test_result_lr$metrics$Metric == "AUC"],
+    test_result_xgb$metrics$Value[test_result_xgb$metrics$Metric == "AUC"]
+  )
+)
+
+print(final_scores)
+
+# Tentukan model terbaik berdasarkan Recall tertinggi
+best_model_idx  <- which.max(final_scores$Recall)
+best_model_name <- final_scores$Model[best_model_idx]
+
+cat("\nModel Final yang Digunakan:\n")
+print(best_model_name)
+```
+
+# Interpretasi Hasil Akhir
+```{r}
+cat("\nInterpretasi Hasil Akhir:\n")
+cat(
+  "- Decision Tree memiliki specificity tertinggi, sehingga lebih baik dalam mengenali nasabah yang tidak gagal bayar,",
+  "namun recall-nya masih lebih rendah dibanding model lain.\n"
+)
+cat(
+  "- Logistic Regression menunjukkan performa yang cukup stabil, dengan recall lebih tinggi dari Decision Tree,",
+  "tetapi precision dan F1-score masih belum menjadi yang terbaik.\n"
+)
+cat(
+  "- XGBoost memberikan performa terbaik secara keseluruhan karena memiliki recall tertinggi sebesar",
+  round(final_scores$Recall[final_scores$Model == "XGBoost"], 4),
+  "dan AUC tertinggi sebesar",
+  round(final_scores$AUC[final_scores$Model == "XGBoost"], 4),
+  ".\n"
+)
+cat(
+  "- Hal ini menunjukkan bahwa XGBoost paling baik dalam mendeteksi nasabah berisiko gagal bayar",
+  "dan paling kuat dalam membedakan kelas default dan non-default.\n"
+)
+cat(
+  "- Precision XGBoost memang lebih rendah, yang berarti false positive masih cukup besar,",
+  "namun dalam konteks risiko kredit kondisi ini masih dapat diterima karena lebih penting menekan false negative.\n"
+)
+```
+# Kesimpulan
+```{r}
+cat("\nKesimpulan:\n")
+cat(
+  "Berdasarkan hasil evaluasi, model terbaik untuk prediksi risiko gagal bayar adalah",
+  best_model_name,
+  "karena memiliki recall dan AUC tertinggi.",
+  "Ini menunjukkan bahwa model paling baik dalam mendeteksi nasabah berisiko gagal bayar,",
+  "sehingga lebih sesuai dengan tujuan analisis.\n"
+)
+```
+
