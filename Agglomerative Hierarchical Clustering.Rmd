@@ -1,0 +1,230 @@
+---
+title: "Tugas Hierarchical"
+author: "Kelompok C"
+date: "2026-05-20"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# Pendahuluan
+
+Analisis ini bertujuan mengelompokkan negara-negara di dunia berdasarkan indeks biaya hidup menggunakan metode **Agglomerative Hierarchical Clustering**. Metode ini bekerja dengan menggabungkan objek-objek yang paling mirip secara bertahap dari bawah ke atas hingga terbentuk satu hierarki klaster.
+
+Data yang digunakan dalam analisis ini terdiri atas 139 negara dengan 6 variabel indeks biaya hidup. Setiap baris merepresentasikan satu negara, sedangkan setiap kolom indeks menggambarkan aspek biaya hidup yang berbeda, seperti biaya hidup umum, biaya sewa, kebutuhan pokok, harga restoran, serta daya beli lokal.
+
+- **Cost of Living Index** — Indeks biaya hidup keseluruhan
+- **Rent Index** — Indeks biaya sewa tempat tinggal
+- **Cost of Living Plus Rent Index** — Gabungan biaya hidup dan sewa
+- **Groceries Index** — Indeks harga kebutuhan pokok
+- **Restaurant Price Index** — Indeks harga restoran
+- **Local Purchasing Power Index** — Indeks daya beli lokal
+---
+
+## 1. Memuat Library dan Data
+
+```{r setup, message=FALSE, warning=FALSE}
+library(readxl)
+library(factoextra)
+library(cluster)
+```
+
+```{r}
+# Membaca data
+data_raw <- read_excel("~/KULIAH/sem 4/pdm/data pdm.xlsx")
+
+# Melihat data
+head(data_raw)
+```
+
+Variabel Rank dan Country tidak digunakan sebagai variabel pembentuk klaster. Variabel Country hanya berfungsi sebagai identitas negara, sedangkan Rank tidak digunakan karena hanya menunjukkan urutan data dan dapat menyebabkan bias dalam proses pengelompokan. 
+
+```{r}
+# Menyiapkan data (hapus Rank, Country, dan variabel redundan)
+data <- as.data.frame(
+  data_raw[, !names(data_raw) %in% c("Rank", "Country", "Cost of Living Plus Rent Index")]
+)
+rownames(data) <- data_raw$Country
+head(data)
+```
+
+```{r}
+# Struktur data
+str(data)
+```
+Kelima variabel ini bertipe data numerik. 
+
+```{r}
+# Cek Missing Value
+colSums(is.na(data))
+```
+Tidak terdapat missing value pada semua variabel di dataset ini.
+---
+
+# Eksplorasi Data (EDA)
+
+### Statistik Deskriptif
+
+```{r}
+summary(data)
+```
+Rent Index memiliki nilai paling rendah dengan rata-rata 16 dibanding variabel lain, artinya biaya sewa secara global relatif terjangkau untuk sebagian besar negara.
+Local Purchasing Power Index punya rata-rata tertinggi (66.38) sekaligus rentang paling lebar (2.50–177.90), menandakan daya beli antar negara sangat bervariasi, ada negara dengan daya beli sangat rendah hingga sangat tinggi.
+Cost of Living, Groceries, dan Restaurant Price Index memiliki pola serupa: mean lebih tinggi dari median, yang berarti distribusinya condong ke kanan (right-skewed), mayoritas negara punya indeks rendah-menengah, tapi ada beberapa negara dengan nilai sangat tinggi yang menarik rata-rata ke atas. 
+
+### Distribusi Variabel
+```{r}
+par(mfrow = c(2, 3))
+for (i in 1:ncol(data)) {
+  hist(data[, i],
+       main   = colnames(data)[i],
+       xlab   = "Nilai Indeks",
+       col    = "steelblue",
+       border = "white")
+}
+par(mfrow = c(1, 1))
+```
+Semua variabel menunjukkan distribusi right-skewed (condong kanan), frekuensi tertinggi ada di nilai rendah-menengah, lalu ekor memanjang ke kanan.
+Rent Index paling ekstrem skewness-nya, mayoritas negara terkonsentrasi di nilai 0–30. Local Purchasing Power sebarannya paling lebar hingga >100, mencerminkan ketimpangan daya beli yang besar antar negara.
+Kondisi ini konsisten dengan statistik deskriptif sebelumnya (mean > median).
+
+### Deteksi Outlier
+
+```{r}
+# Boxplot deteksi outlier visual
+boxplot(data,
+        main     = "Boxplot Deteksi Outlier",
+        las      = 2,
+        col      = "lightblue",
+        cex.axis = 0.7)
+```
+
+Outlier **dibiarkan** karena nilai ekstrem mencerminkan kondisi nyata — negara dengan biaya hidup sangat tinggi maupun sangat rendah tetap merupakan observasi yang valid dan informatif.
+
+---
+
+# Pra-Pemrosesan
+
+### Standarisasi Z-score
+
+Standarisasi diperlukan karena meskipun semua variabel berupa indeks, rentang nilainya berbeda-beda antar variabel sehingga perlu diseragamkan agar kontribusinya seimbang dalam penghitungan jarak.
+
+```{r}
+data_scaled <- scale(data)
+head(round(data_scaled, 3))
+```
+
+---
+
+# Penghitungan Jarak Euclidean
+Nilai jarak Euclidean digunakan untuk mengukur tingkat ketidakmiripan antarnegara berdasarkan enam variabel indeks biaya hidup yang telah distandardisasi. Semakin kecil nilai jarak, semakin mirip karakteristik antarnegara tersebut.
+```{r}
+jarak <- dist(data_scaled, method = "euclidean")
+
+# Menampilkan sebagian matriks jarak
+as.matrix(jarak)[1:6, 1:6]
+```
+Berdasarkan enam negara pertama yang ditampilkan, pasangan Cuba dan Ethiopia memiliki jarak paling kecil, yaitu 0,6026552, sehingga keduanya menunjukkan karakteristik biaya hidup yang paling mirip. Sebaliknya, Syria memiliki jarak yang relatif besar terhadap Ethiopia dan Cameroon, yang menunjukkan adanya perbedaan karakteristik biaya hidup yang cukup kuat.
+
+---
+
+# Hierarchical Clustering
+Pada tahap ini dilakukan proses Hierarchical Clustering menggunakan fungsi hclust() dengan input berupa matriks jarak Euclidean yang telah dihitung sebelumnya. 
+```{r}
+hc <- hclust(jarak, method = "complete")
+hc
+```
+Hasil analisis menggunakan fungsi hclust() menunjukkan bahwa proses pengelompokan dilakukan terhadap 139 negara berdasarkan jarak Euclidean. Metode penggabungan yang digunakan adalah complete linkage, yaitu metode yang menentukan jarak antarklaster berdasarkan jarak terjauh antaranggota dalam klaster.
+
+Pemilihan metode complete linkage bertujuan untuk menghasilkan klaster yang relatif kompak, karena suatu negara akan digabungkan ke dalam klaster tertentu apabila jaraknya tidak terlalu jauh dari anggota lain dalam klaster tersebut. Dengan demikian, hasil clustering diharapkan mampu membentuk kelompok negara yang memiliki kesamaan karakteristik biaya hidup, biaya sewa, harga kebutuhan pokok, harga restoran, serta daya beli lokal.
+
+Namun, output ini belum menunjukkan jumlah klaster akhir. Output tersebut baru menunjukkan bahwa model hierarchical clustering telah berhasil dibentuk. Untuk menentukan kelompok akhir, perlu dilakukan visualisasi dendrogram dan pemotongan pohon klaster menggunakan fungsi cutree().
+---
+
+# Penentuan Jumlah Klaster
+
+```{r}
+# Lihat height penggabungan terakhir
+tail(hc$height, 10)
+```
+
+```{r fig.width=10, fig.height=7}
+# Plot dendrogram dengan garis potong berbagai k
+plot(hc,
+     main = "Dendrogram Hierarchical Clustering",
+     xlab = "Negara",
+     sub  = "",
+     cex  = 0.3)
+
+rect.hclust(hc, k = 3, border = "red")    # k=3
+rect.hclust(hc, k = 4, border = "blue")   # k=4
+rect.hclust(hc, k = 5, border = "green")  # k=5
+```
+Berdasarkan dendrogram Hierarchical Clustering, jumlah klaster yang dipilih adalah k = 3. Pemilihan ini didasarkan pada adanya gap vertikal yang cukup panjang sebelum proses penggabungan klaster berikutnya. Gap vertikal tersebut menunjukkan bahwa klaster-klaster yang terbentuk pada k = 3 memiliki perbedaan karakteristik yang cukup jelas. Sementara itu, pemotongan pada k = 4 dan k = 5 berada pada area dengan gap vertikal yang lebih pendek, sehingga pemisahan tambahan yang dihasilkan tidak terlalu signifikan. Oleh karena itu, k = 3 dipilih karena mampu memberikan hasil pengelompokan yang lebih sederhana, jelas, dan mudah diinterpretasikan.
+
+---
+
+# Pembentukan Klaster
+
+```{r}
+cluster <- cutree(hc, k = 3)
+
+# Jumlah anggota tiap klaster
+table(cluster)
+```
+Setelah jumlah klaster ditentukan sebanyak 3 klaster, proses pembentukan klaster dilakukan menggunakan fungsi cutree(). Hasilnya menunjukkan bahwa Cluster 1 terdiri dari 65 negara, Cluster 2 terdiri dari 61 negara, dan Cluster 3 terdiri dari 13 negara. Pembagian ini menunjukkan bahwa sebagian besar negara tersebar pada dua klaster utama, sedangkan satu klaster lainnya memiliki jumlah anggota yang lebih kecil. Klaster kecil tersebut mengindikasikan adanya kelompok negara dengan karakteristik indeks biaya hidup yang lebih berbeda dibandingkan negara-negara lainnya.
+---
+
+# Hasil & Interpretasi
+
+```{r}
+# Menampilkan hasil bersama data asli
+hasil <- data.frame(
+  Country = rownames(data_scaled),
+  Cluster = cluster
+)
+hasil
+```
+
+```{r}
+# Menampilkan anggota tiap klaster
+hasil <- data.frame(
+  Negara  = names(cluster),
+  Klaster = cluster
+)
+
+# Klaster 1
+hasil[hasil$Klaster == 1, ]
+
+# Klaster 2
+hasil[hasil$Klaster == 2, ]
+
+# Klaster 3
+hasil[hasil$Klaster == 3, ]
+```
+
+```{r}
+# Profil rata-rata tiap klaster
+data$Klaster <- as.factor(cluster)
+
+profil <- aggregate(. ~ Klaster, data = data, FUN = mean)
+profil_num <- profil[, -1]
+profil_hasil <- data.frame(Klaster = profil$Klaster, round(profil_num, 2))
+print(profil_hasil)
+```
+Berdasarkan profil rata-rata tiap klaster, Klaster 1 memiliki karakteristik biaya hidup rendah dengan daya beli rendah, Klaster 2 memiliki biaya hidup sedang dengan daya beli cukup tinggi, sedangkan Klaster 3 memiliki biaya hidup tinggi dengan daya beli sangat tinggi. Hal ini menunjukkan bahwa negara dengan biaya hidup rendah belum tentu memiliki kondisi ekonomi yang lebih baik, karena daya beli masyarakatnya juga dapat rendah. Sebaliknya, negara dengan biaya hidup tinggi belum tentu memiliki tekanan ekonomi paling besar apabila didukung oleh daya beli lokal yang kuat.
+
+```{r fig.width=10, fig.height=6}
+# Visualisasi klaster (PCA 2D)
+fviz_cluster(list(data = data_scaled, cluster = cluster),
+             palette     = "jco",
+             ellipse.type = "convex",
+             repel       = TRUE,
+             labelsize   = 7,
+             ggtheme     = theme_bw()) +
+  labs(title = "Visualisasi Klaster dalam Ruang 2D (PCA)",
+       x = "Dimensi 1 (PC1)", y = "Dimensi 2 (PC2)")
+```
+Berdasarkan visualisasi klaster dalam ruang dua dimensi PCA, terlihat bahwa hasil pengelompokan negara membentuk tiga pola utama. Klaster 1 berada di sisi kiri grafik dan menggambarkan negara-negara dengan biaya hidup rendah serta daya beli rendah. Klaster 2 berada di bagian tengah dengan sebaran yang lebih luas, menunjukkan kelompok negara dengan biaya hidup sedang dan daya beli cukup tinggi. Sementara itu, Klaster 3 berada di sisi kanan grafik dan terpisah cukup jelas dari klaster lainnya, yang menunjukkan kelompok negara dengan biaya hidup tinggi serta daya beli sangat tinggi.
+
+Pemisahan antar klaster terutama terlihat pada Dimensi 1 atau PC1, yang menunjukkan perbedaan tingkat biaya hidup dan daya beli secara umum. Meskipun demikian, terdapat sedikit kedekatan antara Klaster 1 dan Klaster 2, sehingga beberapa negara dapat dianggap memiliki karakteristik transisi. Dengan demikian, visualisasi PCA mendukung hasil clustering karena menunjukkan bahwa ketiga klaster memiliki pola sebaran yang relatif berbeda.
