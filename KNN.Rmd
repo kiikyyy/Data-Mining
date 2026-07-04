@@ -1,0 +1,350 @@
+---
+title: "Tugas 2 PDM"
+author: "Kelompok C"
+date: "2026-03-13"
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r}
+#MEMBACA DATA
+library(readr)
+data <- read_csv("C:/Users/User/Downloads/online_shoppers_intention.csv")
+data
+```
+```{r}
+#CEK TIPE DATA
+str(data)
+```
+
+```{r}
+#UBAH VARIABEL CHARACTER & LOGIS MENJADI NUMERIC
+#ubah tipe data character ke factor
+data[sapply(data, is.character)] <- lapply(data[sapply(data, is.character)], as.factor)
+data[sapply(data, is.logical)] <- lapply(data[sapply(data, is.logical)], as.factor)
+
+#ubah factor ke numerik
+data[, sapply(data, is.factor) & names(data) != "Revenue"] <-
+  lapply(data[, sapply(data, is.factor) & names(data) != "Revenue"], as.numeric)
+
+str(data)
+```
+```{r}
+#CEK MISSING VALUE
+sum(is.na(data))
+```
+```{r}
+#DATA
+set.seed(037)
+idx = sample(1:nrow(data), 1800)
+data = data[idx, ]
+data
+```
+```{r}
+#SPLIT DATA 80 :20
+index <- sample(1:nrow(data), 0.8*nrow(data))
+train_data <- data[index, ]
+test_data <- data[-index, ]
+
+#training data
+x_train <- train_data[, names(train_data) != "Revenue"]
+y_train <- train_data$Revenue
+
+#testing data
+x_test  <- test_data[, names(test_data) != "Revenue"]
+y_test <- test_data$Revenue
+
+print(paste("Jumlah data latih :", nrow(x_train)))
+print(paste("Jumlah data uji   :", nrow(x_test)))
+```
+```{r}
+#PREDIKSI
+library(class)
+head(knn(train = x_train,
+         test = x_test,
+         cl = y_train,
+         k = 3))
+```
+
+```{r}
+#NORMALISASI
+x_train_scaled <- scale(x_train)
+
+# Gunakan mean & sd training untuk testing
+x_test_scaled <- scale(x_test,
+                       center = attr(x_train_scaled, "scaled:center"),
+                       scale  = attr(x_train_scaled, "scaled:scale"))
+```
+
+```{r}
+#FUNGSI MENGHITUNG ERROR
+calc_class_err = function(actual, predicted) {
+  mean(actual != predicted)}
+
+calc_class_err(actual = y_test,
+               predicted = knn(train = x_train,
+                               test = x_test,
+                               cl = y_train,
+                               k = 5))
+
+# UNTUK PREDIKTOR YG UDH DI NORMALISASI
+calc_class_err(actual = y_test,
+               predicted = knn(train = x_train_scaled,
+                               test = x_test_scaled,
+                               cl = y_train,
+                               k = 5))
+```
+
+```{r}
+#MEMILIH K TERBAIK
+set.seed(037)
+k_to_try = 1:100
+err_k = rep(x = 0, times = length(k_to_try))
+for (i in seq_along(k_to_try)) {
+  pred = knn(train = x_train_scaled,
+            test = x_test_scaled,
+            cl = y_train,
+            k = k_to_try[i])
+  err_k[i] = calc_class_err(y_test, pred)}
+
+
+min(err_k)
+which(err_k == min(err_k))
+```
+
+```{r}
+#PLOT ERROR VS PILIHAN K
+plot(err_k, type = "b", col = "dodgerblue", cex = 1, pch = 20,
+     xlab = "k, number of neighbors", ylab = "classification error",
+     main = "(Test) Error Rate vs Neighbors")
+# add line for min error seen
+abline(h = min(err_k), col = "darkorange", lty = 3)
+#add line for minority prevalence in test set
+abline(h = mean(y_test == "1"), col = "grey", lty = 2)
+
+# PREDIKSI DENGAN K TERBAIK
+k_terbaik <- which(err_k == min(err_k))
+pred_final <- knn(train = x_train,
+                  test  = x_test,
+                  cl    = y_train,
+                  k     = k_terbaik)
+```
+
+```{r}
+# EVALUASI MODEL
+library(caret)
+conf_matrix <- table(Prediksi = pred_final, Aktual = y_test)
+print(conf_matrix)
+```
+
+```{r}
+# Prediksi training
+pred_train <- knn(train = x_train_scaled,
+                  test  = x_train_scaled,
+                  cl    = y_train,
+                  k     = k_terbaik)
+
+# Prediksi testing
+pred_test  <- knn(train = x_train_scaled,
+                  test  = x_test_scaled,
+                  cl    = y_train,
+                  k     = k_terbaik)
+
+# Evaluasi Training
+conf_train <- confusionMatrix(
+  factor(pred_train, levels = c("FALSE", "TRUE")),
+  factor(y_train,    levels = c("FALSE", "TRUE")),
+  positive = "TRUE"
+)
+
+# Evaluasi Testing
+conf_test <- confusionMatrix(
+  factor(pred_test, levels = c("FALSE", "TRUE")),
+  factor(y_test,    levels = c("FALSE", "TRUE")),
+  positive = "TRUE"
+)
+
+# Buat Tabel Perbandingan
+hasil_evaluasi <- data.frame(
+  "Algoritma KNN"  = c("Data Latih (Training)", "Data Uji (Testing)"),
+  "Accuracy"       = c(round(conf_train$overall["Accuracy"], 2),
+                        round(conf_test$overall["Accuracy"], 2)),
+  "Precision"      = c(round(conf_train$byClass["Pos Pred Value"], 2),
+                        round(conf_test$byClass["Pos Pred Value"], 2)),
+  "Recall"         = c(round(conf_train$byClass["Sensitivity"], 2),
+                        round(conf_test$byClass["Sensitivity"], 2)),
+  "F1.Score"       = c(round(conf_train$byClass["F1"], 2),
+                        round(conf_test$byClass["F1"], 2)),
+  check.names = FALSE
+)
+
+print(hasil_evaluasi, row.names = FALSE)
+```
+
+Accuracy cukup tinggi (89% dan 87%), namun ini bisa menyesatkan karena data tidak seimbang (imbalanced).
+Precision cukup baik (78% dan 75%), artinya ketika model memprediksi TRUE, cukup sering benar.
+Recall sangat rendah (39% dan 27%), artinya model banyak melewatkan pengunjung yang sebenarnya melakukan pembelian.
+F1-Score rendah (52% dan 39%), menunjukkan model kurang baik dalam mendeteksi kelas TRUE (Revenue = TRUE).
+Model cenderung bias ke kelas FALSE akibat ketidakseimbangan kelas pada data, sehingga perlu dipertimbangkan teknik seperti oversampling (SMOTE) untuk meningkatkan performa deteksi kelas minoritas.
+
+Namun sebelum itu, seleksi fitur berdasarkan korelasi terlebih dahulu untuk mengetahui apakah ada perbedaan dalam performa modelnya.
+
+```{r}
+# SELEKSI FITUR BERDASARKAN KORELASI
+library(caret)
+library(corrplot)
+
+# Hitung korelasi antar fitur
+cor_matrix <- cor(x_train_scaled)
+
+# Plot korelasi
+corrplot(cor_matrix, 
+         method  = "color",
+         type    = "upper",
+         tl.cex  = 0.45,
+         tl.srt  = 45,
+         tl.col  = "black",
+         addCoef.col = "black",
+         number.cex  = 0.3,
+         cl.cex      = 0.6,
+         title   = "Matriks Korelasi Antar Fitur",
+         mar     = c(0, 0, 2, 0),
+         width       = 18,
+         height      = 18)
+
+# Hapus fitur dengan korelasi tinggi (> 0.75)
+high_cor <- findCorrelation(cor_matrix, cutoff = 0.75)
+
+cat("Fitur yang dihapus (nama):", colnames(x_train_scaled)[high_cor], "\n")
+cat("Jumlah fitur sebelum seleksi:", ncol(x_train_scaled), "\n")
+cat("Jumlah fitur setelah seleksi:", ncol(x_train_scaled) - length(high_cor), "\n")
+
+# Hapus fitur berkorelasi tinggi
+x_train_sel <- x_train_scaled[, -high_cor]
+x_test_sel  <- x_test_scaled[, -high_cor]
+```
+
+```{r}
+# CARI K TERBAIK
+set.seed(037)
+k_to_try <- seq(3, 100, by = 2)
+err_k_sel <- rep(0, times = length(k_to_try))
+
+for (i in seq_along(k_to_try)) {
+  pred_tmp  <- knn(train = x_train_sel,
+                   test  = x_test_sel,
+                   cl    = y_train,
+                   k     = k_to_try[i])
+  err_k_sel[i] <- calc_class_err(factor(y_test), factor(pred_tmp))
+}
+
+k_terbaik_sel <- k_to_try[which(err_k_sel == min(err_k_sel))[1]]
+cat("\nK terbaik:", k_terbaik_sel, "\n")
+cat("Error minimum:", min(err_k_sel), "\n")
+```
+
+```{r}
+# EVALUASI
+#EVALUASI MODEL
+library(caret)
+conf_matrix <- table(Prediksi = pred_final, Aktual = y_test)
+print(conf_matrix)
+pred_train_sel <- knn(train = x_train_sel,
+                      test  = x_train_sel,
+                      cl    = y_train,
+                      k     = k_terbaik_sel)
+
+pred_test_sel  <- knn(train = x_train_sel,
+                      test  = x_test_sel,
+                      cl    = y_train,
+                      k     = k_terbaik_sel)
+
+conf_train_sel <- confusionMatrix(
+  factor(pred_train_sel, levels = c("FALSE", "TRUE")),
+  factor(y_train,        levels = c("FALSE", "TRUE")),
+  positive = "TRUE"
+)
+
+conf_test_sel <- confusionMatrix(
+  factor(pred_test_sel, levels = c("FALSE", "TRUE")),
+  factor(y_test,        levels = c("FALSE", "TRUE")),
+  positive = "TRUE"
+)
+
+# TABEL PERBANDINGAN
+hasil_sel <- data.frame(
+  "Algoritma KNN" = c("Data Latih (Training)", "Data Uji (Testing)"),
+  "Accuracy"      = c(round(conf_train_sel$overall["Accuracy"], 2),
+                       round(conf_test_sel$overall["Accuracy"], 2)),
+  "Precision"     = c(round(conf_train_sel$byClass["Pos Pred Value"], 2),
+                       round(conf_test_sel$byClass["Pos Pred Value"], 2)),
+  "Recall"        = c(round(conf_train_sel$byClass["Sensitivity"], 2),
+                       round(conf_test_sel$byClass["Sensitivity"], 2)),
+  "F1.Score"      = c(round(conf_train_sel$byClass["F1"], 2),
+                       round(conf_test_sel$byClass["F1"], 2)),
+  check.names = FALSE
+)
+
+print(hasil_sel, row.names = FALSE)
+```
+Seleksi fitur korelasi dengan menghapus ProductRelated_Duration dan ExitRates memberikan peningkatan pada hampir semua metrik.
+Accuracy data latih (92%) dan data uji (88%) memiliki selisih kecil 4%, menunjukkan model tidak overfitting dan mampu menggeneralisasi data dengan baik.
+Precision sebesar 0.72 pada data uji artinya ketika model memprediksi pengunjung akan melakukan pembelian, 72% prediksi tersebut benar.
+Recall sebesar 0.38 artinya model hanya mampu mendeteksi 38% dari seluruh pengunjung yang benar-benar melakukan pembelian, hal ini dipengaruhi oleh ketidakseimbangan kelas pada data.
+
+Lakukan SMOTE untuk mengatasi ketidakseimbangan kelas
+```{r}
+# INSTALL & LOAD PACKAGE
+library(themis)
+library(recipes)
+library(caret)
+library(class)
+
+# Gabungkan x_train_scaled dan y_train menjadi satu dataframe
+train_smote <- data.frame(x_train_scaled, Revenue = factor(y_train))
+
+cat("Distribusi kelas sebelum SMOTE:\n")
+print(table(train_smote$Revenue))
+
+# Terapkan SMOTE menggunakan recipes
+set.seed(037)
+rec <- recipe(Revenue ~ ., data = train_smote) %>%
+  step_smote(Revenue, over_ratio = 1) %>%
+  prep() %>%
+  bake(new_data = NULL)
+
+cat("\nDistribusi kelas setelah SMOTE:\n")
+print(table(rec$Revenue))
+
+# Pisahkan fitur dan label hasil SMOTE
+x_train_smote <- rec %>% select(-Revenue)
+y_train_smote <- rec$Revenue
+
+# PREDIKSI DENGAN DATA SMOTE
+pred_test_smote <- knn(
+  train = as.matrix(x_train_smote),
+  test  = as.matrix(x_test_scaled),
+  cl    = y_train_smote,
+  k     = k_terbaik
+)
+
+# EVALUASI MODEL SETELAH SMOTE
+conf_smote <- confusionMatrix(
+  factor(pred_test_smote, levels = c("FALSE", "TRUE")),
+  factor(y_test,          levels = c("FALSE", "TRUE")),
+  positive = "TRUE"
+)
+
+cat("\nAccuracy  :", round(conf_smote$overall["Accuracy"], 2), "\n")
+cat("Precision :", round(conf_smote$byClass["Pos Pred Value"], 2), "\n")
+cat("Recall    :", round(conf_smote$byClass["Sensitivity"], 2), "\n")
+cat("F1-Score  :", round(conf_smote$byClass["F1"], 2), "\n")
+```
+SMOTE berhasil mengatasi ketidakseimbangan kelas dari data awal (tanpa korelasi) dan meningkatkan kemampuan model dalam mendeteksi kelas minoritas (TRUE), meskipun Accuracy dan Precision menurun.
+
+Recall meningkat dari 0.27 → 0.66, artinya model jauh lebih baik dalam mendeteksi pengunjung yang benar-benar melakukan pembelian.
+Accuracy menurun dari 0.87 → 0.76, karena model tidak lagi bias ke kelas FALSE.
+F1-Score meningkat dari 0.39 → 0.47, menunjukkan keseimbangan Precision dan Recall yang lebih baik.
+Precision menurun dari 0.75 → 0.36, artinya model lebih banyak memprediksi TRUE namun tidak selalu tepat.
+
+Oleh karena itu, disimpulkan untuk menggunakan hasil tanpa balancing dan menggunakan seleksi fitur korelasi karena akurasinya tetap tinggi, model tidak overfitting, dan penurunan Recall dapat dijelaskan sebagai konsekuensi ketidakseimbangan kelas pada data asli.
