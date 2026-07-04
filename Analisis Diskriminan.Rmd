@@ -1,0 +1,234 @@
+---
+title: "Tugas 4"
+author: "Kelompok C"
+date: "2026-04-03"
+output: html_document
+---
+```{r}
+#MEMBACA DATA
+data <- read.csv("C:/Users/User/Downloads/hepatitis+c+virus+hcv+for+egyptian+patients/HCV-Egy-Data.csv")
+head(data)
+```
+
+```{r}
+#CEK TIPE DATA
+str(data)
+```
+
+```{r}
+#UBAH TIPE DATA 
+data$Gender       <- as.factor(data$Gender)
+data$Fever       <- as.factor(data$Fever)
+data$'Nausea.Vomting'       <- as.factor(data$'Nausea.Vomting')
+data$Headache       <- as.factor(data$Headache)
+data$Diarrhea       <- as.factor(data$Diarrhea)
+data$'Fatigue...generalized.bone.ache'       <- as.factor(data$'Fatigue...generalized.bone.ache')
+data$Jaundice       <- as.factor(data$Jaundice)
+data$'Epigastric.pain'       <- as.factor(data$'Epigastric.pain')
+data$'Baseline.histological.Grading'<- as.factor(data$'Baseline.histological.Grading')
+data$Baselinehistological.staging    <- factor(
+  data$Baselinehistological.staging,
+  levels = 1:4,
+  labels = c("Stage1", "Stage2", "Stage3", "Stage4")
+)
+```
+
+
+```{r}
+#CEK MISSING VALUE
+cat("Jumlah missing values:", sum(is.na(data)), "\n")
+```
+
+```{r}
+#CEK PROPORSI
+table(data$'Baselinehistological.staging')
+prop.table(table(data$'Baselinehistological.staging'))
+```
+
+```{r}
+#SELEKSI VARIABEL DENGAN KORELASI
+library(corrplot)
+
+X <- data[, sapply(data, is.numeric)]
+X <- X[, !names(X) %in% "Baselinehistological.staging"]
+
+cor_matrix <- cor(X, use = "complete.obs")
+
+corrplot(cor_matrix, method = "color", type = "upper",
+         tl.cex = 0.6, tl.col = "black",
+         title  = "Matriks Korelasi Prediktor",
+         mar    = c(0, 0, 2, 0))
+
+# Pasangan dengan korelasi > 0.8
+cor_data <- as.data.frame(as.table(cor_matrix))
+cor_data <- subset(cor_data, abs(Freq) > 0.8 & Var1 != Var2)
+print(cor_data[order(-abs(cor_data$Freq)), ])
+```
+
+
+```{r}
+#SELEKSI VARIABEL DENGAN VIF
+library(car)
+
+#Buat data sementara dengan target numerik (VIF butuh regresi linear)
+data_vif          <- data
+data_vif$stag_num <- as.numeric(data_vif$Baselinehistological.staging)
+
+#Ambil hanya prediktor numerik
+nama_pred  <- names(X)   
+
+formula_lm <- as.formula(
+  paste("stag_num ~", paste(nama_pred, collapse = " + "))
+)
+lm_vif     <- lm(formula_lm, data = data_vif)
+vif_values <- vif(lm_vif)
+
+cat("Nilai VIF semua prediktor:\n")
+print(sort(vif_values, decreasing = TRUE))
+
+# Filter variabel dengan VIF < 10
+final_vars <- names(vif_values[vif_values < 10])
+cat("Variabel numerik terpilih dengan VIF < 10:\n")
+print(final_vars)
+```
+
+```{r}
+#SELEKSI VARIABEL DENGAN STEPWISE
+library(klaR)
+
+set.seed(123)
+step_result <- stepclass(
+  Baselinehistological.staging ~ ., 
+  data        = data,
+  method      = "lda",
+  direction   = "both",
+  improvement = 0.01,
+  fold        = 5
+)
+
+print(step_result)
+```
+
+```{r}
+#PARTITION PLOT
+library(MASS)
+library(klaR)
+library(plyr)
+
+# Ambil beberapa variabel numerik terpilih
+numeric_subset <- final_vars[1:3]  # ambil 3 variabel numerik pertama
+
+# Buat formula hanya dengan subset
+formula_subset <- as.formula(
+  paste("Baselinehistological.staging ~", paste(numeric_subset, collapse=" + "))
+)
+
+# Plot LDA & QDA
+partimat(formula_subset, data = data, method = "lda")
+partimat(formula_subset, data = data, method = "qda")
+```
+
+```{r}
+#SPLIT DATA
+library(caret)
+set.seed(123)
+index <- createDataPartition(data$'Baselinehistological.staging', p=.80, list=F)
+train_data <- data[index, ]
+test_data  <- data[-index, ]
+
+print(paste("Jumlah data latih:", nrow(train_data)))
+print(paste("Jumlah data uji  :", nrow(test_data)))
+```
+
+```{r}
+#MODEL
+formula <- as.formula(
+  paste("Baselinehistological.staging ~", paste(final_vars, collapse = " + "))
+)
+
+lda_model <- lda(formula, data = train_data)
+lda_model
+```
+```{r}
+qda_model <- qda(formula, data = train_data)
+qda_model
+```
+
+```{r}
+#PREDIKSI DATA TRAIN
+train.ldapred <- predict(lda_model, train_data)
+head(train.ldapred$posterior)
+```
+
+```{r}
+# confusion matrix LDA untuk data train
+lda.cm_train <- table(train_data$Baselinehistological.staging, train.ldapred$class)
+lda.cm_train
+```
+
+```{r}
+# Hitung akurasi LDA
+accuracy.lda <-
+round((sum(diag(lda.cm_train))/sum(lda.cm_train))*100,2)
+accuracy.lda
+```
+```{r}
+#Prediksi data train
+train.qdapred <- predict(qda_model, train_data)
+head(train.qdapred$posterior)
+```
+
+```{r}
+# confusion matrix QDA untuk data train
+qda.cm_train <- table(train_data$Baselinehistological.staging,
+train.qdapred$class)
+qda.cm_train
+```
+
+```{r}
+# Hitung akurasi QDA
+accuracy.qda <-
+round((sum(diag(qda.cm_train))/sum(qda.cm_train))*100,2)
+accuracy.qda
+```
+
+
+```{r}
+## Prediksi untuk data test
+test.ldapred <- predict(lda_model, test_data)
+head(test.ldapred$posterior)
+```
+
+```{r}
+# confusion matrix LDA untuk data test
+lda.cm_test <- table(test_data$Baselinehistological.staging, test.ldapred$class)
+lda.cm_test
+```
+
+```{r}
+# Hitung akurasi LDA
+lda.accuracy_test <- round((sum(diag(lda.cm_test))/sum(lda.cm_test))*100,2)
+lda.accuracy_test
+```
+
+```{r}
+# confusion matrix QDA untuk data test
+test.qdapred <- predict(qda_model, test_data)
+qda.cm_test <- table(test_data$Baselinehistological.staging, test.qdapred$class)
+qda.cm_test
+```
+
+```{r}
+# Hitung akurasi QDA
+qda.accuracy_test <- round((sum(diag(qda.cm_test))/sum(qda.cm_test))*100,2)
+qda.accuracy_test
+```
+
+```{r}
+cat("Akurasi LDA data train :", accuracy.lda, "%\n")
+cat("Akurasi QDA data train :", accuracy.qda, "%\n")
+
+cat("Akurasi LDA data test  :", lda.accuracy_test, "%\n")
+cat("Akurasi QDA data test  :", qda.accuracy_test, "%\n")
+```
+
